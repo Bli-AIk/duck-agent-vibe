@@ -1,0 +1,25 @@
+# Copy this file to a project root as .duck.toml when project-specific policy is needed.
+enabled = true
+debounce_ms = 2000
+max_batch_ms = 30000
+cooldown_ms = 900000
+large_change_threshold = 12
+max_question_context_chars = 6000
+keybinding = "ctrl+shift+d"
+
+# Extra patterns to ignore or explicitly watch. Gitignore is respected by default.
+ignore = ["docs/generated"]
+watch = []
+
+# Diagnostics are opt-in. A configured command is trusted to write only to its
+# declared directories; all other Agent commands remain blocked.
+[[diagnostics]]
+name = "tests"
+command = "npm"
+args = ["test"]
+allowed_write_dirs = ["coverage", ".cache"]
+auto_on_large_change = false
+
+# Optional model override. By default the current Pi model is used.
+# supervisor_provider = "anthropic"
+# supervisor_model = "claude-sonnet-4-20250514"
