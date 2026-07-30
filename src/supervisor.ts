@@ -3,11 +3,11 @@ import type { ExtensionContext, ModelRegistry } from "@earendil-works/pi-coding-
 import { buildEvidenceLines, buildQuestionContext } from "./redaction.js";
 import type { DuckConfig, QuestionDraft, QuestionEvidence } from "./types.js";
 
-const SYSTEM_PROMPT = `You are Duck, a Socratic software-development supervisor.
-Ask exactly one focused question about the developer's intent, boundary, tradeoff, failure, or test design.
-Do not provide code, patches, commands, or a complete solution.
-Use only the supplied evidence. Keep the question concise and answerable by the developer.
-Return JSON only: {"question":"...","category":"intent|boundary|failure|tradeoff|testing"}.`;
+const SYSTEM_PROMPT = `你是 Duck，一名苏格拉底式软件开发督导。
+只围绕开发者的意图、边界、取舍、失败或测试设计提出一个聚焦问题。
+不要提供代码、补丁、命令或完整解决方案。
+只使用提供的证据。问题必须简短，并且开发者可以直接回答。
+只返回 JSON：{"question":"...","category":"intent|boundary|failure|tradeoff|testing"}。`;
 
 function textFromContent(content: unknown): string {
   if (!Array.isArray(content)) return "";
@@ -20,8 +20,8 @@ function textFromContent(content: unknown): string {
 function fallbackQuestion(evidence: QuestionEvidence): QuestionDraft {
   const category = evidence.diagnostics.length > 0 ? "failure" : evidence.summary.createdFiles > 0 ? "boundary" : "intent";
   const question = evidence.diagnostics.length > 0
-    ? "What invariant did you expect this change to preserve, and which failing observation would falsify that expectation?"
-    : "What problem is this change solving, and what deliberate boundary keeps the new behavior from spreading further?";
+    ? "你预期这次变更保持什么不变量？哪个失败现象会推翻这个判断？"
+    : "这次变更要解决什么问题？你设置了什么明确边界，防止新行为扩散？";
   return { question, category, evidence: buildEvidenceLines(evidence.summary, evidence.diagnostics), context: "fallback" };
 }
 
@@ -48,7 +48,7 @@ export async function generateQuestion(
   if (!model) return fallbackQuestion(evidence);
   const provider = context.modelRegistry.getProvider(model.provider);
   if (!provider) return fallbackQuestion(evidence);
-  const prompt = `Project evidence:\n${buildQuestionContext(root, evidence, config.maxQuestionContextChars)}\n\nAsk the one question now.`;
+  const prompt = `项目证据：\n${buildQuestionContext(root, evidence, config.maxQuestionContextChars)}\n\n现在只提出一个问题。`;
   try {
     const streamOptions = {
       maxTokens: 300,

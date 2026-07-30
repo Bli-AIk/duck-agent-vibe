@@ -1,0 +1,125 @@
+import { readFile, readdir } from "node:fs/promises";
+import path from "node:path";
+import { isSensitivePath, limitText } from "./redaction.js";
+import type { ChangeScore, ChangeSummary, DiagnosticFailure } from "./types.js";
+
+const KNOWN_MANIFEST_FILES = new Set([
+  "Cargo.toml",
+  "package.json",
+  "deno.json",
+  "deno.jsonc",
+  "pyproject.toml",
+  "go.mod",
+  "pom.xml",
+  "build.gradle",
+  "build.gradle.kts",
+  "Gemfile",
+  "composer.json",
+  "Package.swift",
+]);
+
+const LOCKFILE_SUFFIXES = [
+  ".lock",
+  "-lock.json",
+  ".lock.json",
+  ".lock.yaml",
+];
+
+function isProjectManifest(fileName: string): boolean {
+  return KNOWN_MANIFEST_FILES.has(fileName) || fileName.endsWith(".csproj") || fileName.endsWith(".fsproj");
+}
+
+function isLockfile(fileName: string): boolean {
+  return LOCKFILE_SUFFIXES.some((suffix) => fileName.endsWith(suffix));
+}
+
+function summarizeManifest(fileName: string, content: string): string {
+  if (fileName === "package.json") {
+    try {
+      const parsed = JSON.parse(content) as Record<string, unknown>;
+      return JSON.stringify({
+        name: parsed.name,
+        version: parsed.version,
+        scripts: parsed.scripts,
+        dependencies: parsed.dependencies,
+        devDependencies: parsed.devDependencies,
+        workspaces: parsed.workspaces,
+      }, null, 2);
+    } catch {
+      return limitText(content, 1_600);
+    }
+  }
+
+  return limitText(content, 1_600);
+}
+
+export async function collectProjectFacts(root: string): Promise<string> {
+  const facts: string[] = [];
+  let entries: string[] = [];
+  try {
+    entries = (await readdir(root, { withFileTypes: true }))
+      .filter((entry) => entry.isFile() && isProjectManifest(entry.name) && !isLockfile(entry.name))
+      .map((entry) => entry.name)
+      .sort();
+  } catch {
+    return "无法读取工作区项目清单；不能据此确认项目类型或依赖。";
+  }
+
+  for (const fileName of entries) {
+    try {
+      const content = await readFile(path.join(root, fileName), "utf8");
+      const summary = limitText(summarizeManifest(fileName, content), 1_800);
+      facts.push(`${fileName}：\n${summary || "（空）"}`);
+    } catch {
+      // A missing manifest is normal for a generic workspace.
+    }
+  }
+  return facts.length > 0
+    ? facts.join("\n\n")
+    : "未发现受支持的项目清单；不能据此确认项目类型或依赖。";
+}
+
+export function shouldReportGuidedProgress(
+  score: ChangeScore,
+  diagnostics: DiagnosticFailure[],
+  now: number,
+  lastReportedAt: number,
+  cooldownMs: number,
+  minChangeScore: number,
+): boolean {
+  if (diagnostics.length === 0 && score.value < minChangeScore) return false;
+  return now - lastReportedAt >= cooldownMs;
+}
+
+export function formatGuidedProgress(
+  summary: ChangeSummary,
+  score: ChangeScore,
+  diagnostics: DiagnosticFailure[],
+  projectFacts = "未读取项目清单。",
+): string {
+  const statusLabels: Record<ChangeSummary["files"][number]["status"], string> = {
+    modified: "已修改",
+    added: "已新增",
+    deleted: "已删除",
+    renamed: "已重命名",
+  };
+  const files = summary.files
+    .slice(0, 8)
+    .map((file) => `${isSensitivePath(file.path) ? "[REDACTED PATH]" : file.path}（${statusLabels[file.status]}）`)
+    .join(", ");
+  const extraFiles = summary.files.length > 8 ? `；另有 ${summary.files.length - 8} 个` : "";
+  const failures = diagnostics.length > 0
+    ? `需要关注的诊断：${diagnostics.map((failure) => failure.name).join("、")}。`
+    : "";
+
+  return [
+    "[DUCK_PROGRESS_HANDOFF]",
+    "Duck 已将当前代码库进度传递给 AI。",
+    `本次静默批次：${summary.filesChanged} 个文件，新增 ${summary.addedLines} 行，删除 ${summary.deletedLines} 行，变更评分 ${score.value.toFixed(1)}。`,
+    `涉及：${files || "（仅检测到元数据变化）"}${extraFiles}。${failures}`,
+    "受限项目证据（不是完成确认；未发送完整差异，也不使用锁文件作为依赖依据）：",
+    projectFacts,
+    "文件系统不能证明用户执行了哪个等价命令。只有观察到的文件和项目清单才算证据；依赖只有在项目清单中声明时才算已添加。",
+    "请结合当前对话判断当前引导步骤是否已经完成；然后只做一件事：给出一个简短确认和下一步唯一动作，或只问一个阻塞问题。不要展开后续步骤，不要生成完整代码。",
+  ].join("\n");
+}

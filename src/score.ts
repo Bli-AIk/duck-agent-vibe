@@ -12,11 +12,11 @@ export function scoreChange(summary: ChangeSummary, threshold: number): ChangeSc
     summary.changedBytes / 10_000;
 
   const reasons: string[] = [];
-  if (summary.filesChanged > 0) reasons.push(`${summary.filesChanged} file(s) changed`);
-  if (summary.addedLines + summary.deletedLines > 0) reasons.push(`${summary.addedLines} additions / ${summary.deletedLines} deletions`);
-  if (summary.createdFiles > 0) reasons.push(`${summary.createdFiles} new file(s)`);
-  if (summary.deletedFiles > 0) reasons.push(`${summary.deletedFiles} deleted file(s)`);
-  if (summary.directoriesChanged > 1) reasons.push(`${summary.directoriesChanged} directories touched`);
+  if (summary.filesChanged > 0) reasons.push(`变更了 ${summary.filesChanged} 个文件`);
+  if (summary.addedLines + summary.deletedLines > 0) reasons.push(`新增 ${summary.addedLines} 行，删除 ${summary.deletedLines} 行`);
+  if (summary.createdFiles > 0) reasons.push(`新增 ${summary.createdFiles} 个文件`);
+  if (summary.deletedFiles > 0) reasons.push(`删除 ${summary.deletedFiles} 个文件`);
+  if (summary.directoriesChanged > 1) reasons.push(`涉及 ${summary.directoriesChanged} 个目录`);
 
   return { value, threshold, large: value >= threshold, reasons };
 }

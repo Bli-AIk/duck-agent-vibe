@@ -4,10 +4,19 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION="$ROOT_DIR/src/index.ts"
 INFO_FILE="${DUCK_AGENT_INFO_FILE:-/tmp/info.txt}"
-KEY_FILE="${DUCK_AGENT_KEY_FILE:-/tmp/key.txt}"
+KEY_FILE="${DUCK_AGENT_KEY_FILE:-${XDG_CONFIG_HOME:-${HOME}/.config}/duck-agent/api-key}"
 CODEX_CONFIG="${DUCK_AGENT_CODEX_CONFIG:-${HOME}/.codex/config.toml}"
 RUNTIME_DIR="$ROOT_DIR/.duck-runtime"
 RUNTIME_MODELS="$RUNTIME_DIR/models.json"
+
+# Keep the request-time key outside /tmp so it survives reboots. This only
+# creates the file and changes its mode; its contents are never opened here.
+KEY_PARENT_DIR="$(dirname "$KEY_FILE")"
+mkdir -p "$KEY_PARENT_DIR"
+if [[ ! -f "$KEY_FILE" ]]; then
+  touch "$KEY_FILE"
+fi
+chmod 600 "$KEY_FILE"
 
 if [[ -x "$ROOT_DIR/node_modules/.bin/pi" ]]; then
   PI_BIN="$ROOT_DIR/node_modules/.bin/pi"
@@ -22,7 +31,7 @@ fi
 mkdir -p "$RUNTIME_DIR"
 
 # Parse model metadata at launch without printing either source file. Codex's
-# provider config is authoritative when present. The key file is intentionally
+# Provider config is authoritative when present. The key file is intentionally
 # never opened by this launcher; Pi reads it on request.
 (
 cd "$ROOT_DIR"
@@ -147,7 +156,7 @@ const config = {
       name: "Duck runtime provider",
       baseUrl,
       api: codexModel?.api ?? "openai-completions",
-      apiKey: `!cat ${process.env.DUCK_AGENT_KEY_FILE ?? "/tmp/key.txt"}`,
+      apiKey: `!cat ${process.env.DUCK_AGENT_KEY_FILE ?? "/home/aik/.config/duck-agent/api-key"}`,
       models: [
         {
           id: model,

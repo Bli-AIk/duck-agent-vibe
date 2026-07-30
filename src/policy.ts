@@ -24,22 +24,22 @@ export function evaluateToolCall(
   config: DuckConfig,
 ): PolicyDecision {
   if (toolName === "write" || toolName === "edit") {
-    return { action: "confirm", reason: `${toolName} changes project files`, toolName };
+    return { action: "confirm", reason: `${toolName} 会修改项目文件`, toolName };
   }
   if (READ_ONLY_TOOLS.has(toolName)) {
-    return { action: "allow", reason: "read-only tool", toolName };
+    return { action: "allow", reason: "只读工具", toolName };
   }
   if (toolName === "bash") {
     const command = commandFromInput(input);
     if (config.diagnostics.some((spec) => diagnosticCommandMatches(command, spec))) {
-      return { action: "allow", reason: "explicitly configured diagnostic command", toolName };
+      return { action: "allow", reason: "已明确配置的诊断命令", toolName };
     }
     if (isReadOnlyCommand(command)) {
-      return { action: "allow", reason: "known read-only shell command", toolName };
+      return { action: "allow", reason: "已知只读 shell 命令", toolName };
     }
-    return { action: "confirm", reason: "Bash may change project files or run an unapproved command", toolName };
+    return { action: "confirm", reason: "Bash 可能修改项目文件或执行未获批准的命令", toolName };
   }
-  return { action: "confirm", reason: "unrecognised tool is blocked by the mutation guard", toolName };
+  return { action: "confirm", reason: "未识别工具被变更保护拦截", toolName };
 }
 
 export function isDiagnosticCommand(command: string, config: DuckConfig): DiagnosticSpec | undefined {

@@ -11,9 +11,12 @@ export interface DiagnosticSpec {
 
 export interface DuckConfig {
   enabled: boolean;
+  guideEnabled: boolean;
   debounceMs: number;
   maxBatchMs: number;
   cooldownMs: number;
+  guideCooldownMs: number;
+  guideMinChangeScore: number;
   largeChangeThreshold: number;
   maxQuestionContextChars: number;
   keybinding: string;

@@ -37,10 +37,10 @@ function diffForPaths(root: string, paths: string[], maxChars: number): string {
 
 export function buildQuestionContext(root: string, evidence: QuestionEvidence, maxChars: number): string {
   const summary = JSON.stringify({
-    source: evidence.summary.source,
+    source: evidence.summary.source === "git" ? "Git" : "快照",
     files: evidence.summary.files.map((file) => ({
       path: isSensitivePath(file.path) ? "[REDACTED PATH]" : file.path,
-      status: file.status,
+      status: file.status === "modified" ? "已修改" : file.status === "added" ? "已新增" : file.status === "deleted" ? "已删除" : "已重命名",
       addedLines: file.addedLines,
       deletedLines: file.deletedLines,
     })),
@@ -54,14 +54,14 @@ export function buildQuestionContext(root: string, evidence: QuestionEvidence, m
   }, null, 2);
   const paths = evidence.summary.files.map((file) => file.path);
   const diff = diffForPaths(root, paths, Math.max(0, maxChars - summary.length - 64));
-  return limitText(`${summary}\n\nRelevant diff:\n${diff || "(metadata only)"}`, maxChars);
+  return limitText(`${summary}\n\n相关差异：\n${diff || "（仅有元数据）"}`, maxChars);
 }
 
 export function buildEvidenceLines(summary: ChangeSummary, diagnostics: DiagnosticFailure[]): string[] {
   const lines = [
-    `${summary.filesChanged} file(s) changed; +${summary.addedLines}/-${summary.deletedLines} lines`,
-    `change score ${summary.filesChanged === 0 ? "0" : "non-zero"} from ${summary.source} state`,
+    `变更了 ${summary.filesChanged} 个文件；新增 ${summary.addedLines} 行，删除 ${summary.deletedLines} 行`,
+    `变更评分：${summary.filesChanged === 0 ? "0" : "非零"}；来源：${summary.source === "git" ? "Git" : "快照"}`,
   ];
-  for (const failure of diagnostics) lines.push(`diagnostic failed: ${failure.name}`);
+  for (const failure of diagnostics) lines.push(`诊断失败：${failure.name}`);
   return lines;
 }

@@ -44,7 +44,7 @@ describe("Pi extension integration", () => {
           setStatus: vi.fn(),
           setWidget: vi.fn(),
           notify: (message: string) => notifications.push(message),
-          select: vi.fn(async () => "Keep it blocked"),
+          select: vi.fn(async () => "保持拦截"),
           confirm: vi.fn(),
           input: vi.fn(),
         },
@@ -58,14 +58,25 @@ describe("Pi extension integration", () => {
       await handlers.get("session_start")?.({ reason: "startup" }, ctx);
       expect(commands.has("duck")).toBe(true);
       expect(shortcuts.has("ctrl+shift+d")).toBe(true);
-      expect(notifications.some((message) => message.includes("Duck loaded"))).toBe(true);
+      expect(notifications.some((message) => message.includes("Duck 已加载配置"))).toBe(true);
 
       const promptResult = await handlers.get("before_agent_start")?.({
         prompt: "modify the file",
         systemPrompt: "base prompt",
       }, ctx);
-      expect(promptResult.systemPrompt).toContain("A request such as \"modify this file\"");
-      expect(promptResult.systemPrompt).toContain("not an execution failure");
+      expect(promptResult.systemPrompt).toContain("普通变更请求");
+      expect(promptResult.systemPrompt).toContain("不是执行失败");
+      expect(promptResult.systemPrompt).toContain("硬限制，不是风格建议");
+      expect(promptResult.systemPrompt).toContain("最终回复不得超过 100 个汉字");
+      expect(promptResult.systemPrompt).toContain("/duck guide on");
+
+      await commands.get("duck")?.("on", ctx);
+      await commands.get("duck")?.("guide on", ctx);
+      const guidedPromptResult = await handlers.get("before_agent_start")?.({
+        prompt: "teach me the next step",
+        systemPrompt: "base prompt",
+      }, ctx);
+      expect(guidedPromptResult.systemPrompt).toContain("每次只给一个下一步动作");
 
       const result = await handlers.get("tool_call")?.({
         toolName: "write",
@@ -73,8 +84,8 @@ describe("Pi extension integration", () => {
         input: { path: "src/main.ts", content: "changed" },
       }, ctx);
       expect(result).toMatchObject({ block: true });
-      expect(result.reason).toContain("intentionally blocked before execution");
-      expect(result.reason).toContain("No command ran and no file was changed");
+      expect(result.reason).toContain("有意拦截");
+      expect(result.reason).toContain("没有执行命令，也没有修改文件");
 
       const normalizedResult = await handlers.get("message_end")?.({
         message: {

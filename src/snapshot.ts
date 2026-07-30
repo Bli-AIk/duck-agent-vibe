@@ -33,9 +33,10 @@ export async function collectChangeSummary(
   changedPaths: Iterable<string>,
   baseline: ReadonlyMap<string, FileSnapshot>,
   forceSource: "git" | "snapshot" = "snapshot",
+  includeGitChanges = true,
 ): Promise<ChangeSummary> {
   const paths = new Set([...changedPaths].map((value) => relativePath(root, path.isAbsolute(value) ? value : path.join(root, value))));
-  const gitPaths = gitChangedPaths(root);
+  const gitPaths = includeGitChanges ? gitChangedPaths(root) : new Set<string>();
   for (const value of gitPaths) paths.add(value);
 
   const files: ChangeFile[] = [];
@@ -43,8 +44,8 @@ export async function collectChangeSummary(
     if (!relative || relative.startsWith("..") || isGitIgnored(root, relative)) continue;
     const current = await captureSnapshot(root, relative);
     const previous = baseline.get(relative);
-    const gitStats = gitNumstat(root, relative);
-    const gitStatus = gitPathStatus(root, relative);
+    const gitStats = includeGitChanges ? gitNumstat(root, relative) : undefined;
+    const gitStatus = includeGitChanges ? gitPathStatus(root, relative) : undefined;
     const existsBefore = previous?.exists ?? (gitStatus !== "added");
 
     if (!current.exists) {

@@ -5,9 +5,12 @@ import type { DiagnosticSpec, DuckConfig } from "./types.js";
 
 export const DEFAULT_CONFIG: DuckConfig = {
   enabled: true,
+  guideEnabled: false,
   debounceMs: 2_000,
   maxBatchMs: 30_000,
   cooldownMs: 15 * 60_000,
+  guideCooldownMs: 8_000,
+  guideMinChangeScore: 2,
   largeChangeThreshold: 12,
   maxQuestionContextChars: 6_000,
   keybinding: "ctrl+shift+d",
@@ -69,9 +72,12 @@ export async function loadDuckConfig(root: string): Promise<{ config: DuckConfig
     path: configPath,
     config: {
       enabled: asBoolean(source.enabled, DEFAULT_CONFIG.enabled),
+      guideEnabled: asBoolean(source.guide_enabled ?? source.guideEnabled, DEFAULT_CONFIG.guideEnabled),
       debounceMs: Math.max(250, asNumber(source.debounce_ms, DEFAULT_CONFIG.debounceMs)),
       maxBatchMs: Math.max(1_000, asNumber(source.max_batch_ms, DEFAULT_CONFIG.maxBatchMs)),
       cooldownMs: Math.max(0, asNumber(source.cooldown_ms, DEFAULT_CONFIG.cooldownMs)),
+      guideCooldownMs: Math.max(0, asNumber(source.guide_cooldown_ms, DEFAULT_CONFIG.guideCooldownMs)),
+      guideMinChangeScore: Math.max(0, asNumber(source.guide_min_change_score, DEFAULT_CONFIG.guideMinChangeScore)),
       largeChangeThreshold: Math.max(1, asNumber(source.large_change_threshold, DEFAULT_CONFIG.largeChangeThreshold)),
       maxQuestionContextChars: Math.max(1_000, asNumber(source.max_question_context_chars, DEFAULT_CONFIG.maxQuestionContextChars)),
       keybinding: asString(source.keybinding, DEFAULT_CONFIG.keybinding),
