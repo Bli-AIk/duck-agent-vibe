@@ -34,6 +34,8 @@ describe("guided mode", () => {
     expect(message).toContain("src/main.rs");
     expect(message).toContain("下一步唯一动作");
     expect(message).toContain("可观察性硬约束");
+    expect(message).toContain("检查归属硬约束");
+    expect(message).toContain("保存后的 watcher 交接就是完成信号");
     expect(message).toContain("禁止把打开、查看、阅读、浏览、准备文件或终端当作步骤");
     expect(message).toContain("最终回复不得承诺尚未执行的 Duck 动作");
     expect(message).not.toContain("```");
