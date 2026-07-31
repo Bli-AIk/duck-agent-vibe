@@ -7,7 +7,7 @@ import type { ChangeScore, ChangeSummary } from "../src/types.js";
 const summary: ChangeSummary = {
   root: "/tmp/project",
   source: "snapshot",
-  files: [{ path: "src/main.rs", status: "modified", addedLines: 2, deletedLines: 1, changedBytes: 20 }],
+  files: [{ path: "src/main.rs", status: "modified", addedLines: 2, deletedLines: 1, changedBytes: 20, lineRanges: ["4-5"] }],
   filesChanged: 1,
   addedLines: 2,
   deletedLines: 1,
@@ -32,10 +32,15 @@ describe("guided mode", () => {
     const message = formatGuidedProgress(summary, score, []);
     expect(message).toContain("Duck 已将当前代码库进度传递给 AI");
     expect(message).toContain("src/main.rs");
+    expect(message).toContain("变更行 4-5");
+    expect(message).toContain("精确读取：offset=4, limit=2");
+    expect(message).toContain("不依赖 Git diff");
+    expect(message).toContain("交接执行顺序");
+    expect(message).toContain("空的引导计划不是阻塞");
     expect(message).toContain("下一步唯一动作");
     expect(message).toContain("可观察性硬约束");
     expect(message).toContain("检查归属硬约束");
-    expect(message).toContain("保存后的 watcher 交接就是完成信号");
+    expect(message).toContain("文件保存并产生新的进度交接才是完成信号");
     expect(message).toContain("不要要求开发者打开页面、点击界面、手动测试");
     expect(message).toContain("开发者动作必须包含具体相对路径");
     expect(message).toContain("禁止把打开、查看、阅读、浏览、准备文件或终端当作步骤");

@@ -15,6 +15,7 @@ describe("mutation policy", () => {
 
   it("allows known read-only shell commands but not shell mutation", () => {
     expect(evaluateToolCall("bash", { command: "git diff" }, "off", DEFAULT_CONFIG).action).toBe("allow");
+    expect(evaluateToolCall("bash", { command: "nl -ba test.a" }, "on", DEFAULT_CONFIG).action).toBe("allow");
     expect(evaluateToolCall("bash", { command: "pwd && printf 'files' | head" }, "on", DEFAULT_CONFIG).action).toBe("allow");
     expect(evaluateToolCall("bash", { command: "cargo check" }, "on", DEFAULT_CONFIG).action).toBe("allow");
     expect(evaluateToolCall("bash", { command: "npm test" }, "on", DEFAULT_CONFIG).action).toBe("allow");

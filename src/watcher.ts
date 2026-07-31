@@ -92,6 +92,8 @@ export function matchesSpec(relative: string, spec: string): boolean {
 export class ProjectWatcher {
   private watcher: FSWatcher | undefined;
   private batcher: ChangeBatcher | undefined;
+  private readyPromise: Promise<void> | undefined;
+  private ignoredPath: ((input: string) => boolean) | undefined;
 
   constructor(private readonly options: ProjectWatcherOptions) {}
 
@@ -113,12 +115,16 @@ export class ProjectWatcher {
       if (DEFAULT_IGNORES.some((spec) => matchesSpec(relative, spec))) return true;
       return gitRepository && isGitIgnored(this.options.root, relative);
     };
+    this.ignoredPath = ignored;
 
     this.watcher = chokidar.watch(this.options.root, {
       ignored,
       ignoreInitial: true,
       persistent: true,
       awaitWriteFinish: { stabilityThreshold: 150, pollInterval: 50 },
+    });
+    this.readyPromise = new Promise<void>((resolve) => {
+      this.watcher?.once("ready", resolve);
     });
     for (const event of ["add", "change", "unlink"] as const) {
       this.watcher.on(event, (filePath) => {
@@ -128,10 +134,27 @@ export class ProjectWatcher {
     }
   }
 
+  async currentPaths(): Promise<Set<string>> {
+    await this.readyPromise;
+    const paths = new Set<string>();
+    const watched = this.watcher?.getWatched() ?? {};
+    for (const [directory, names] of Object.entries(watched)) {
+      for (const name of names) {
+        const absolute = path.join(directory, name);
+        if (this.ignoredPath?.(absolute)) continue;
+        const relative = relativePath(this.options.root, absolute);
+        if (relative && !relative.startsWith("..")) paths.add(relative);
+      }
+    }
+    return paths;
+  }
+
   async stop(): Promise<void> {
     this.batcher?.stop();
     this.batcher = undefined;
     if (this.watcher) await this.watcher.close();
     this.watcher = undefined;
+    this.readyPromise = undefined;
+    this.ignoredPath = undefined;
   }
 }

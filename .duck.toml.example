@@ -7,9 +7,20 @@ max_batch_ms = 30000
 cooldown_ms = 900000
 guide_cooldown_ms = 8000
 guide_min_change_score = 2
+# 默认不因保存/文件变更自动触发引导交接；需要时手动开启。
+guide_watch_handoff = false
 large_change_threshold = 12
 max_question_context_chars = 6000
+## 引导模式默认不自动读取完整差异；仅在这里打开后，静默交接才附带受限 diff。
+guide_auto_read_diff = false
+max_diff_chars = 6000
 keybinding = "ctrl+shift+d"
+control_socket = ""
+
+[reply_shortcuts]
+detail = "ctrl+alt+m"
+next = "ctrl+alt+n"
+hint = "ctrl+alt+h"
 
 # 额外的忽略或明确监控模式。默认遵守 Git 忽略规则。
 ignore = ["docs/generated"]

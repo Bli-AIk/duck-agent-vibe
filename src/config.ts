@@ -1,7 +1,13 @@
 import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "smol-toml";
-import type { DiagnosticSpec, DuckConfig } from "./types.js";
+import type { DiagnosticSpec, DuckConfig, ReplyShortcutConfig } from "./types.js";
+
+export const DEFAULT_REPLY_SHORTCUTS: ReplyShortcutConfig = {
+  detail: "ctrl+alt+m",
+  next: "ctrl+alt+n",
+  hint: "ctrl+alt+h",
+};
 
 export const DEFAULT_CONFIG: DuckConfig = {
   enabled: true,
@@ -11,9 +17,14 @@ export const DEFAULT_CONFIG: DuckConfig = {
   cooldownMs: 15 * 60_000,
   guideCooldownMs: 8_000,
   guideMinChangeScore: 2,
+  guideWatchHandoff: false,
   largeChangeThreshold: 12,
   maxQuestionContextChars: 6_000,
+  guideAutoReadDiff: false,
+  maxDiffChars: 6_000,
   keybinding: "ctrl+shift+d",
+  replyShortcuts: { ...DEFAULT_REPLY_SHORTCUTS },
+  controlSocket: "",
   ignore: [],
   watch: [],
   diagnostics: [],
@@ -33,6 +44,16 @@ function asBoolean(value: unknown, fallback: boolean): boolean {
 
 function asStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function parseReplyShortcuts(value: unknown): ReplyShortcutConfig {
+  if (!value || typeof value !== "object") return { ...DEFAULT_REPLY_SHORTCUTS };
+  const source = value as Record<string, unknown>;
+  return {
+    detail: asString(source.detail, DEFAULT_REPLY_SHORTCUTS.detail),
+    next: asString(source.next, DEFAULT_REPLY_SHORTCUTS.next),
+    hint: asString(source.hint, DEFAULT_REPLY_SHORTCUTS.hint),
+  };
 }
 
 function parseDiagnostic(value: unknown): DiagnosticSpec | undefined {
@@ -78,9 +99,14 @@ export async function loadDuckConfig(root: string): Promise<{ config: DuckConfig
       cooldownMs: Math.max(0, asNumber(source.cooldown_ms, DEFAULT_CONFIG.cooldownMs)),
       guideCooldownMs: Math.max(0, asNumber(source.guide_cooldown_ms, DEFAULT_CONFIG.guideCooldownMs)),
       guideMinChangeScore: Math.max(0, asNumber(source.guide_min_change_score, DEFAULT_CONFIG.guideMinChangeScore)),
+      guideWatchHandoff: asBoolean(source.guide_watch_handoff ?? source.guideWatchHandoff, DEFAULT_CONFIG.guideWatchHandoff),
       largeChangeThreshold: Math.max(1, asNumber(source.large_change_threshold, DEFAULT_CONFIG.largeChangeThreshold)),
       maxQuestionContextChars: Math.max(1_000, asNumber(source.max_question_context_chars, DEFAULT_CONFIG.maxQuestionContextChars)),
+      guideAutoReadDiff: asBoolean(source.guide_auto_read_diff ?? source.guideAutoReadDiff, DEFAULT_CONFIG.guideAutoReadDiff),
+      maxDiffChars: Math.max(500, asNumber(source.max_diff_chars, DEFAULT_CONFIG.maxDiffChars)),
       keybinding: asString(source.keybinding, DEFAULT_CONFIG.keybinding),
+      replyShortcuts: parseReplyShortcuts(source.reply_shortcuts ?? source.replyShortcuts),
+      controlSocket: asString(source.control_socket ?? source.controlSocket, DEFAULT_CONFIG.controlSocket),
       ignore: asStringArray(source.ignore),
       watch: asStringArray(source.watch),
       diagnostics,

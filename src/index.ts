@@ -1,5 +1,7 @@
 export { default } from "./extension.js";
 export * from "./config.js";
+export * from "./control.js";
+export * from "./diff.js";
 export * from "./guidance.js";
 export * from "./policy.js";
 export * from "./score.js";

@@ -15,7 +15,7 @@ const DANGEROUS_COMMANDS = [
   /^(?:env\s+)?find\b.*(?:^|\s)-exec(?:dir)?\b/i,
 ];
 
-const READ_ONLY_COMMANDS = /^(?:pwd\b|ls\b|find\b|rg\b|grep\b|cat\b|head\b|tail\b|less\b|more\b|wc\b|file\b|stat\b|du\b|tree\b|sort\b|uniq\b|diff\b|which\b|whereis\b|type\b|printf\b|echo\b|git\s+(?:status|diff|log|show|branch|remote|rev-parse|check-ignore|ls-files)\b)/i;
+const READ_ONLY_COMMANDS = /^(?:pwd\b|ls\b|find\b|rg\b|grep\b|cat\b|head\b|tail\b|nl\b|less\b|more\b|wc\b|file\b|stat\b|du\b|tree\b|sort\b|uniq\b|diff\b|which\b|whereis\b|type\b|printf\b|echo\b|git\s+(?:status|diff|log|show|branch|remote|rev-parse|check-ignore|ls-files)\b)/i;
 const PROJECT_CHECK_COMMANDS = /^(?:(?:cargo\s+(?:check|test|build|clippy)\b|cargo\s+fmt\b.*(?:--check\b)|go\s+(?:test|vet|build)\b|(?:npm|pnpm|yarn|bun)\s+(?:test\b|run\s+(?:check|test|lint|typecheck|build)\b)|(?:python|python3)\s+-m\s+(?:pytest|unittest)\b|pytest\b|mvn\s+(?:test|verify)\b|gradle(?:w)?\s+(?:check|test|build)\b|dotnet\s+(?:build|test)\b))/i;
 
 function commandFromInput(input: Record<string, unknown>): string {

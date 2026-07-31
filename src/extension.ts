@@ -1,15 +1,21 @@
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolResultEvent } from "@earendil-works/pi-coding-agent";
+import { isKeyRelease, matchesKey } from "@earendil-works/pi-tui";
 import { DEFAULT_CONFIG, loadDuckConfig } from "./config.js";
 import { writeAudit } from "./audit.js";
+import { startControlSocket, resolveControlSocketPath, type ControlRequest, type ControlSocket } from "./control.js";
+import { buildCurrentDiff } from "./diff.js";
+import { gitChangedPaths } from "./git.js";
 import { evaluateToolCall, isDiagnosticCommand, isProjectCheckCommand } from "./policy.js";
 import { collectProjectFacts, formatGuidedProgress, shouldReportGuidedProgress } from "./guidance.js";
 import { generateQuestion } from "./supervisor.js";
-import { collectChangeSummary, updateSnapshotBaseline } from "./snapshot.js";
+import { captureSnapshot, collectChangeSummary, updateSnapshotBaseline } from "./snapshot.js";
 import { scoreChange } from "./score.js";
 import { ProjectWatcher } from "./watcher.js";
 import type {
   DiagnosticFailure,
   DuckConfig,
+  FileSnapshot,
+  GuidePlan,
   QuestionDraft,
   QuestionEvidence,
   SupervisionMode,
@@ -30,9 +36,61 @@ interface RuntimeState {
   lastProgressAt: number;
   diagnostics: DiagnosticFailure[];
   presenting: boolean;
+  observedPaths: Set<string>;
+  manualDiffAcknowledged: Map<string, FileSnapshot>;
+  guidePlan: GuidePlan;
+  controlSocket?: ControlSocket;
+  terminalInputUnsubscribe?: () => void;
+  changeQueue: Promise<void>;
 }
 
 const PROMPT_RESPONSE_LIMIT = 80;
+const GUIDE_STATE_ENTRY = "duck-guide-state";
+const REPLY_MESSAGES = {
+  detail: "请更详细说明",
+  next: "请继续下一步",
+  hint: "请给我一个提示",
+} as const;
+
+const PI_HELP_COMMANDS = [
+  ["help", "查看所有命令或 Duck 专属命令"],
+  ["settings", "打开设置"],
+  ["model", "选择模型"],
+  ["scoped-models", "管理可循环模型"],
+  ["export", "导出会话"],
+  ["import", "导入会话"],
+  ["share", "分享会话"],
+  ["copy", "复制上一条 AI 回复"],
+  ["name", "设置会话名称"],
+  ["session", "查看会话信息"],
+  ["changelog", "查看更新记录"],
+  ["hotkeys", "查看快捷键"],
+  ["fork", "从旧消息创建分支"],
+  ["clone", "复制当前会话"],
+  ["tree", "切换会话分支"],
+  ["trust", "管理项目可信状态"],
+  ["login", "配置模型认证"],
+  ["logout", "移除模型认证"],
+  ["new", "开始新会话"],
+  ["compact", "压缩当前会话"],
+  ["resume", "恢复其他会话"],
+  ["reload", "重新加载配置和扩展"],
+  ["quit", "退出 Pi"],
+] as const;
+
+const DUCK_HELP_COMMANDS = [
+  ["duck", "查看状态，也兼容旧的子命令入口"],
+  ["duck-on", "开启自动督导"],
+  ["duck-off", "关闭监控和主动提问，保留变更拦截"],
+  ["duck-guide", "切换或设置单步引导模式"],
+  ["duck-plan", "查看、设置或清除引导计划"],
+  ["duck-diff", "主动触发当前工作区进度交接"],
+  ["duck-ask", "立即请求一个督导问题"],
+  ["duck-accept", "发布待处理的督导问题"],
+  ["duck-dismiss", "忽略待处理的督导问题"],
+  ["duck-reply", "发送常用回复"],
+  ["duck-socket", "查看外部控制 socket 路径"],
+] as const;
 
 const MUTATION_POLICY_PROMPT = `
 
@@ -90,16 +148,22 @@ const GUIDED_MODE_PROMPT = `
 - 给出当前动作后停下，等待开发者尝试、反馈或修改项目。
 - 只有当前动作确实需要时，才给一个很短的命令或例子；不要给长代码块。
 - 当消息以 [DUCK_PROGRESS_HANDOFF] 开头时，Duck 传递的是代码库观察结果。判断当前动作是否完成，然后只给一个下一步动作或一个阻塞问题。
+- [DUCK_PROGRESS_HANDOFF] 是当前回合的工作信号，不是普通状态消息。收到后先处理交接证据，再回复开发者：只要交接列出变更行范围，下一次工具调用必须对其中一个文件做精确读取。
+- Pi 的 read 工具精确读取使用 path、offset（从 1 开始）和 limit；例如“test.a；变更行 8”必须调用 read(path="test.a", offset=8, limit=1)，“3-5”必须使用 offset=3, limit=3。多段范围分别精确读取。
+- 读取交接列出的变更行之前不得回复开发者；禁止先读取 1-200、1-2000 或整个文件，也不要把变更行扩大成无关上下文。只有交接没有行号，或文件已删除而无法读取时，才可选择最小必要检查。
 - 进度交接是观察，不是开发者确认。区分“请求过”“声称完成”和“实际观察到”。
+- 引导计划为空不是阻塞，也不等于没有任务。先从当前对话最近的开发者任务继承目标；只有整个对话确实没有任何任务意图时，才问一个简短问题。不要仅因“未设置引导目标”反复追问。
 - 文件系统无法证明开发者执行了哪个等价命令；无法确定时必须说明不确定，不要猜测。
 - 需要代码库推进时，只指定一个文件中的一个修改目标，让开发者自己实现并保存；不要同时安排创建、安装、打开、运行等多个动作，也不要给可粘贴代码。
 - 引导动作必须写出具体相对路径、一个修改目标和保存这个目标的完成信号；不要把“打开/查看/准备”当动作，也不要在同一轮附加安装、运行或下一个文件。
 - 如果当前动作需要 Duck 了解代码或依赖，先调用只读工具；不要让开发者代跑 Duck 可以执行的检查。
 - 开发者的引导动作只能是修改并保存一个指定项目文件；运行检查、读取文件、确认依赖和查看状态都由 Duck 自己完成，不得作为开发者步骤。
-- 文件保存后的 watcher 交接就是完成信号；不要额外要求开发者“保存后回复我”、报告已保存或转发检查输出。只有确实缺少意图时才问一个问题。
+- 文件保存并产生新的进度交接才是完成信号；自动交接可能被项目配置关闭。没有收到交接前，不要声称 Duck 已看到保存内容，也不要额外要求开发者报告已保存或转发检查输出。
 - 不得要求开发者打开页面、点击界面、手动测试、观察屏幕或报告浏览器结果；这些动作没有 Duck 可观察的完成信号。需要验证时由 Duck 自己调用可用检查工具；没有可用工具就不要声称验证已完成。
-- 开发者动作的文字必须包含具体相对路径；“继续修改指定文件”这类泛化说法无效。watcher 会自动传递交接，不能要求开发者手动发送交接。
+- 开发者动作的文字必须包含具体相对路径；“继续修改指定文件”这类泛化说法无效。自动交接关闭时，可以让开发者主动触发 /duck-diff 传递进度。
 - 只有项目清单声明了依赖，才算依赖已完成。不要从锁文件推断依赖，也不要为进度交接读取或总结锁文件。
+- 自动差异读取默认关闭；除非进度交接明确出现受限差异，否则不要自行假定或要求完整 diff。
+- 进度交接中的变更行范围来自 Duck 的本地快照比较；即使项目不是 Git，也不要要求开发者提供修改前文件或把缺少 Git 基线当成阻塞理由。首次观察标明的范围只能说明当前文件范围，不代表已还原原始差异。
 - 不要仅因为文件发生变化就声称步骤完成；只使用交接中的清单证据，必要时做有针对性的只读检查。
 `;
 const DUCK_BLOCK_PREFIX = "DUCK POLICY INTERCEPTION:";
@@ -111,6 +175,67 @@ function textFromContent(content: unknown): string {
     .filter((item): item is { type: "text"; text: string } => Boolean(item && typeof item === "object" && (item as { type?: string }).type === "text"))
     .map((item) => item.text)
     .join("\n");
+}
+
+function createGuidePlan(): GuidePlan {
+  return { goal: "", stepNumber: 1, lastObservedFiles: [] };
+}
+
+function restoreGuidePlan(ctx: ExtensionContext): GuidePlan {
+  const fallback = createGuidePlan();
+  try {
+    const entries = ctx.sessionManager?.getEntries?.() ?? [];
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      const entry = entries[index];
+      if (!entry || entry.type !== "custom" || entry.customType !== GUIDE_STATE_ENTRY || !entry.data || typeof entry.data !== "object") continue;
+      const data = entry.data as Record<string, unknown>;
+      return {
+        goal: typeof data.goal === "string" ? data.goal : "",
+        stepNumber: typeof data.stepNumber === "number" && Number.isFinite(data.stepNumber) && data.stepNumber >= 1
+          ? Math.floor(data.stepNumber)
+          : 1,
+        lastObservedFiles: Array.isArray(data.lastObservedFiles)
+          ? data.lastObservedFiles.filter((item): item is string => typeof item === "string").slice(0, 32)
+          : [],
+        lastHandoffAt: typeof data.lastHandoffAt === "number" ? data.lastHandoffAt : undefined,
+      };
+    }
+  } catch {
+    // A fake or legacy session manager may not expose custom entries.
+  }
+  return fallback;
+}
+
+function persistGuidePlan(pi: ExtensionAPI, plan: GuidePlan): void {
+  pi.appendEntry(GUIDE_STATE_ENTRY, plan);
+}
+
+function formatGuidePlanContext(plan: GuidePlan): string {
+  const files = plan.lastObservedFiles.length > 0 ? plan.lastObservedFiles.join(", ") : "无";
+  return [
+    "",
+    "## Duck 当前引导上下文",
+    `[DUCK_GUIDE_CONTEXT] 引导目标：${plan.goal || "未设置；根据当前对话确定目标"}`,
+    `当前引导轮次：第 ${plan.stepNumber} 轮。最近一次交接观察到的文件：${files}。`,
+    "这是持久化的轮次和观察记录，不代表某个自然语言步骤已经完成；完成判断必须依靠当前交接证据。",
+  ].join("\n");
+}
+
+function formatGuidePlanStatus(plan: GuidePlan): string {
+  return `引导目标：${plan.goal || "未设置"}；当前轮次：第 ${plan.stepNumber} 轮；最近观察文件：${plan.lastObservedFiles.join(", ") || "无"}`;
+}
+
+function snapshotsEqual(left: FileSnapshot, right: FileSnapshot): boolean {
+  return left.exists === right.exists
+    && left.size === right.size
+    && left.lines === right.lines
+    && left.hash === right.hash;
+}
+
+function enqueueChange(state: RuntimeState, task: () => Promise<void>): Promise<void> {
+  const queued = state.changeQueue.then(task, task);
+  state.changeQueue = queued.catch(() => undefined);
+  return queued;
 }
 
 function formatQuestion(draft: QuestionDraft): string {
@@ -170,11 +295,67 @@ async function presentPending(pi: ExtensionAPI, ctx: ExtensionContext, state: Ru
   }
 }
 
-async function evaluateBatch(pi: ExtensionAPI, ctx: ExtensionContext, state: RuntimeState, paths: Set<string>): Promise<void> {
+async function sendProgressHandoff(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  state: RuntimeState,
+  summary: Awaited<ReturnType<typeof collectChangeSummary>>,
+  score: ReturnType<typeof scoreChange>,
+  failures: DiagnosticFailure[],
+): Promise<void> {
+  const guided = state.mode === "on" && state.guided && state.guideActive;
+  if (guided) {
+    state.progressPending = true;
+    state.lastProgressAt = Date.now();
+  }
+
+  const projectFacts = await collectProjectFacts(state.root);
+  const automaticDiff = guided && state.config.guideAutoReadDiff
+    ? await buildCurrentDiff(state.root, summary.files.map((file) => file.path), state.config.maxDiffChars)
+    : "";
+  let nextPlan: GuidePlan | undefined;
+  if (guided) {
+    nextPlan = {
+      ...state.guidePlan,
+      stepNumber: state.guidePlan.stepNumber + 1,
+      lastObservedFiles: summary.files.map((file) => file.path).slice(0, 32),
+      lastHandoffAt: Date.now(),
+    };
+    state.guidePlan = nextPlan;
+    persistGuidePlan(pi, nextPlan);
+  }
+
+  pi.sendMessage({
+    customType: "duck-progress",
+    content: formatGuidedProgress(summary, score, failures, projectFacts, automaticDiff, nextPlan),
+    display: false,
+    details: { summary, score },
+  }, { triggerTurn: true, deliverAs: "followUp" });
+  ctx.ui.notify("Duck 已将当前代码库进度传递给 AI", "info");
+}
+
+async function evaluateBatch(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  state: RuntimeState,
+  paths: Set<string>,
+  comparisonBaseline: ReadonlyMap<string, FileSnapshot> = state.baseline,
+): Promise<void> {
   if (state.mode !== "on") return;
+  for (const path of paths) state.observedPaths.add(path);
   const guidedBatch = state.guided && state.guideActive;
-  const summary = await collectChangeSummary(state.root, paths, state.baseline, "snapshot", !guidedBatch);
+  const excludedManualPaths = new Set<string>();
+  for (const [relative, acknowledged] of state.manualDiffAcknowledged) {
+    const current = await captureSnapshot(state.root, relative);
+    if (snapshotsEqual(current, acknowledged)) {
+      excludedManualPaths.add(relative);
+    } else {
+      state.manualDiffAcknowledged.delete(relative);
+    }
+  }
+  const summary = await collectChangeSummary(state.root, paths, comparisonBaseline, "snapshot", !guidedBatch, excludedManualPaths);
   if (summary.filesChanged === 0) return;
+  if (guidedBatch && !state.config.guideWatchHandoff) return;
   const score = scoreChange(summary, state.config.largeChangeThreshold);
   const failures = [...state.diagnostics];
   state.diagnostics = [];
@@ -213,17 +394,7 @@ async function evaluateBatch(pi: ExtensionAPI, ctx: ExtensionContext, state: Run
       state.config.guideCooldownMs,
       state.config.guideMinChangeScore,
     )) return;
-
-    state.progressPending = true;
-    state.lastProgressAt = Date.now();
-    const projectFacts = await collectProjectFacts(state.root);
-    pi.sendMessage({
-      customType: "duck-progress",
-      content: formatGuidedProgress(summary, score, failures, projectFacts),
-      display: false,
-      details: { summary, score },
-    }, { triggerTurn: true, deliverAs: "followUp" });
-    ctx.ui.notify("Duck 已将当前代码库进度传递给 AI", "info");
+    await sendProgressHandoff(pi, ctx, state, summary, score, failures);
     return;
   }
 
@@ -232,6 +403,38 @@ async function evaluateBatch(pi: ExtensionAPI, ctx: ExtensionContext, state: Run
   state.pending = await generateQuestion(ctx, state.root, evidence, state.config);
   state.lastPromptAt = Date.now();
   await presentPending(pi, ctx, state);
+}
+
+async function sendCurrentDiffNow(pi: ExtensionAPI, ctx: ExtensionContext, state: RuntimeState): Promise<void> {
+  const watchedPaths = state.watcher ? await state.watcher.currentPaths() : new Set<string>();
+  const paths = new Set([...state.observedPaths, ...watchedPaths, ...gitChangedPaths(state.root)]);
+  const summary = await collectChangeSummary(state.root, paths, state.baseline, "snapshot", false);
+  if (summary.filesChanged === 0) {
+    ctx.ui.notify("Duck 未发现当前工作区变更", "info");
+    return;
+  }
+  const score = scoreChange(summary, state.config.largeChangeThreshold);
+  const failures = [...state.diagnostics];
+  state.diagnostics = [];
+  await updateSnapshotBaseline(state.root, summary.files.map((file) => file.path), state.baseline);
+  for (const file of summary.files) {
+    const snapshot = state.baseline.get(file.path);
+    if (snapshot) state.manualDiffAcknowledged.set(file.path, snapshot);
+  }
+  await sendProgressHandoff(pi, ctx, state, summary, score, failures);
+}
+
+function sendCurrentDiff(pi: ExtensionAPI, ctx: ExtensionContext, state: RuntimeState): Promise<void> {
+  return enqueueChange(state, () => sendCurrentDiffNow(pi, ctx, state));
+}
+
+function sendCommonReply(pi: ExtensionAPI, ctx: ExtensionContext, text: string): void {
+  try {
+    if (ctx.isIdle()) pi.sendUserMessage(text);
+    else pi.sendUserMessage(text, { deliverAs: "steer" });
+  } catch (error) {
+    ctx.ui.notify(`Duck 无法发送快捷回复：${error instanceof Error ? error.message : String(error)}`, "error");
+  }
 }
 
 async function askNow(pi: ExtensionAPI, ctx: ExtensionContext, state: RuntimeState): Promise<void> {
@@ -249,6 +452,8 @@ async function toggleMode(pi: ExtensionAPI, ctx: ExtensionContext, state: Runtim
     state.guideActive = state.guided;
     state.watcher ??= createWatcher(pi, ctx, state);
     state.watcher.start();
+    await initializeGuidedHandoff(pi, ctx, state, true);
+    await initializeSnapshotBaseline(state);
   } else {
     state.guideActive = false;
     await stopWatcher(state);
@@ -261,13 +466,45 @@ async function toggleMode(pi: ExtensionAPI, ctx: ExtensionContext, state: Runtim
   ctx.ui.notify(`Duck 督导${mode === "on" ? "已开启" : "已关闭"}`, "info");
 }
 
-async function toggleGuidance(ctx: ExtensionContext, state: RuntimeState, enabled: boolean): Promise<void> {
+const INITIAL_HANDOFF_PATH_LIMIT = 128;
+
+function isInitialProgressPath(relative: string): boolean {
+  return relative !== ".duck.toml";
+}
+
+async function initializeSnapshotBaseline(state: RuntimeState): Promise<void> {
+  if (!state.watcher) return;
+  const paths = new Set([
+    ...await state.watcher.currentPaths(),
+    ...gitChangedPaths(state.root),
+  ]);
+  if (paths.size === 0) return;
+  for (const relative of paths) state.observedPaths.add(relative);
+  await updateSnapshotBaseline(state.root, paths, state.baseline);
+}
+
+async function initializeGuidedHandoff(pi: ExtensionAPI, ctx: ExtensionContext, state: RuntimeState, force = false): Promise<void> {
+  if (state.mode !== "on" || !state.guided || !state.guideActive || !state.config.guideWatchHandoff || !state.watcher) return;
+
+  const changedPaths = [...gitChangedPaths(state.root)].filter(isInitialProgressPath);
+  const watchedPaths = changedPaths.length > 0
+    ? changedPaths
+    : [...await state.watcher.currentPaths()].filter(isInitialProgressPath);
+  const initialPaths = new Set(watchedPaths.slice(0, INITIAL_HANDOFF_PATH_LIMIT));
+  if (initialPaths.size === 0) return;
+  const comparisonBaseline = force ? new Map<string, FileSnapshot>() : state.baseline;
+  await enqueueChange(state, () => evaluateBatch(pi, ctx, state, initialPaths, comparisonBaseline));
+}
+
+async function toggleGuidance(pi: ExtensionAPI, ctx: ExtensionContext, state: RuntimeState, enabled: boolean): Promise<void> {
   state.guided = enabled;
   state.guideActive = enabled && state.mode === "on";
   state.progressPending = false;
   state.deferredProgressPaths.clear();
   setStatus(ctx, state);
   ctx.ui.notify(`Duck 引导模式已${enabled ? "开启" : "关闭"}`, "info");
+  await initializeGuidedHandoff(pi, ctx, state, enabled);
+  if (enabled) await initializeSnapshotBaseline(state);
 }
 
 function createWatcher(pi: ExtensionAPI, ctx: ExtensionContext, state: RuntimeState): ProjectWatcher {
@@ -280,8 +517,31 @@ function createWatcher(pi: ExtensionAPI, ctx: ExtensionContext, state: RuntimeSt
     watch: state.config.watch,
     debounceMs: state.config.debounceMs,
     maxBatchMs: state.config.maxBatchMs,
-    onBatch: (paths) => evaluateBatch(pi, ctx, state, paths),
+    onBatch: (paths) => enqueueChange(state, () => evaluateBatch(pi, ctx, state, paths)),
   });
+}
+
+async function handleControlRequest(
+  request: ControlRequest,
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  state: RuntimeState,
+): Promise<{ ok: boolean; message: string }> {
+  if (request.type === "diff") {
+    await sendCurrentDiff(pi, ctx, state);
+    return { ok: true, message: "已请求发送当前工作区差异。" };
+  }
+  sendCommonReply(pi, ctx, request.text);
+  return { ok: true, message: "已发送快捷回复。" };
+}
+
+async function startControl(pi: ExtensionAPI, ctx: ExtensionContext, state: RuntimeState): Promise<void> {
+  const socketPath = resolveControlSocketPath(state.root, state.config.controlSocket);
+  try {
+    state.controlSocket = await startControlSocket(socketPath, (request) => handleControlRequest(request, pi, ctx, state));
+  } catch (error) {
+    ctx.ui.notify(`Duck 外部控制不可用：${error instanceof Error ? error.message : String(error)}`, "warning");
+  }
 }
 
 async function handleToolCall(pi: ExtensionAPI, ctx: ExtensionContext, state: RuntimeState | undefined, event: ToolCallEvent): Promise<{ block: true; reason: string } | undefined> {
@@ -298,6 +558,10 @@ async function handleToolCall(pi: ExtensionAPI, ctx: ExtensionContext, state: Ru
     lastProgressAt: 0,
     diagnostics: [],
     presenting: false,
+    observedPaths: new Set(),
+    manualDiffAcknowledged: new Map(),
+    guidePlan: createGuidePlan(),
+    changeQueue: Promise.resolve(),
   };
   const decision = evaluateToolCall(event.toolName, event.input, activeState.mode, activeState.config);
   if (decision.action === "allow") return undefined;
@@ -353,8 +617,103 @@ export function diagnosticFailure(event: ToolResultEvent, config: DuckConfig): D
 
 export default function duckExtension(pi: ExtensionAPI): void {
   let state: RuntimeState | undefined;
+  const registeredShortcuts = new Set<string>();
+
+  const registerShortcut = (key: string, description: string, handler: (ctx: ExtensionContext) => void | Promise<void>): void => {
+    const normalized = key.trim();
+    if (!normalized || registeredShortcuts.has(normalized)) return;
+    registeredShortcuts.add(normalized);
+    try {
+      pi.registerShortcut(normalized as Parameters<ExtensionAPI["registerShortcut"]>[0], { description, handler });
+    } catch {
+      registeredShortcuts.delete(normalized);
+    }
+  };
+
+  const registerConfiguredShortcuts = (config: DuckConfig): void => {
+    registerShortcut(config.keybinding, "切换 Duck 督导", async (ctx) => {
+      if (state) await toggleMode(pi, ctx, state, state.mode === "on" ? "off" : "on");
+    });
+    registerShortcut(config.replyShortcuts.detail, REPLY_MESSAGES.detail, (ctx) => {
+      if (state) sendCommonReply(pi, ctx, REPLY_MESSAGES.detail);
+    });
+    registerShortcut(config.replyShortcuts.next, REPLY_MESSAGES.next, (ctx) => {
+      if (state) sendCommonReply(pi, ctx, REPLY_MESSAGES.next);
+    });
+    registerShortcut(config.replyShortcuts.hint, REPLY_MESSAGES.hint, (ctx) => {
+      if (state) sendCommonReply(pi, ctx, REPLY_MESSAGES.hint);
+    });
+  };
+
+  const handlePlanCommand = (args: string, ctx: ExtensionContext): void => {
+    if (!state) return;
+    const goal = args.trim();
+    if (!goal) {
+      ctx.ui.notify(formatGuidePlanStatus(state.guidePlan), "info");
+      return;
+    }
+    if (goal.toLowerCase() === "clear") {
+      state.guidePlan = createGuidePlan();
+      persistGuidePlan(pi, state.guidePlan);
+      ctx.ui.notify("Duck 引导计划已清除", "info");
+      return;
+    }
+    state.guidePlan = { goal, stepNumber: 1, lastObservedFiles: [] };
+    persistGuidePlan(pi, state.guidePlan);
+    ctx.ui.notify(`Duck 引导计划已设置：${goal}`, "info");
+  };
+
+  const handleReplyCommand = (args: string, ctx: ExtensionContext): void => {
+    if (!state) return;
+    const reply = args.trim().toLowerCase();
+    const message = reply === "detail"
+      ? REPLY_MESSAGES.detail
+      : reply === "next"
+        ? REPLY_MESSAGES.next
+        : reply === "hint"
+          ? REPLY_MESSAGES.hint
+          : undefined;
+    if (message) {
+      sendCommonReply(pi, ctx, message);
+      return;
+    }
+    ctx.ui.notify("可用回复：/duck-reply detail、/duck-reply next、/duck-reply hint", "info");
+  };
+
+  const showHelp = (args: string, ctx: ExtensionContext): void => {
+    const filter = args.trim().toLowerCase();
+    const knownNames = new Set<string>([...PI_HELP_COMMANDS, ...DUCK_HELP_COMMANDS].map(([name]) => name));
+    const dynamicCommands: Array<[string, string]> = [];
+    try {
+      if (typeof pi.getCommands === "function") {
+        for (const command of pi.getCommands()) {
+          if (!knownNames.has(command.name)) dynamicCommands.push([command.name, command.description ?? "无说明"]);
+        }
+      }
+    } catch {
+      // Help remains useful even before the Pi command registry is bound.
+    }
+    const allCommands = [...PI_HELP_COMMANDS, ...DUCK_HELP_COMMANDS, ...dynamicCommands];
+    const commands = filter === "duck"
+      ? DUCK_HELP_COMMANDS
+      : filter
+        ? allCommands.filter(([name]) => name.includes(filter))
+        : allCommands;
+    if (commands.length === 0) {
+      ctx.ui.notify(`没有匹配的命令：${filter}`, "info");
+      return;
+    }
+    ctx.ui.notify(commands.map(([name, description]) => `/${name}：${description}`).join("\n"), "info");
+  };
 
   pi.on("session_start", async (_event, ctx) => {
+    if (state) {
+      state.terminalInputUnsubscribe?.();
+      state.terminalInputUnsubscribe = undefined;
+      await stopWatcher(state);
+      await state.controlSocket?.close();
+      state.controlSocket = undefined;
+    }
     const root = ctx.cwd;
     let loaded: Awaited<ReturnType<typeof loadDuckConfig>>;
     try {
@@ -376,11 +735,26 @@ export default function duckExtension(pi: ExtensionAPI): void {
       lastProgressAt: 0,
       diagnostics: [],
       presenting: false,
+      observedPaths: new Set(),
+      manualDiffAcknowledged: new Map(),
+      guidePlan: restoreGuidePlan(ctx),
+      changeQueue: Promise.resolve(),
     };
+    if (typeof ctx.ui.onTerminalInput === "function") {
+      state.terminalInputUnsubscribe = ctx.ui.onTerminalInput((data) => {
+        if (isKeyRelease(data) || !matchesKey(data, "shift+tab")) return undefined;
+        void toggleGuidance(pi, ctx, state!, !state!.guided);
+        return { consume: true };
+      });
+    }
+    registerConfiguredShortcuts(state.config);
     setStatus(ctx, state);
+    await startControl(pi, ctx, state);
     if (state.mode === "on") {
       state.watcher = createWatcher(pi, ctx, state);
       state.watcher.start();
+      await initializeGuidedHandoff(pi, ctx, state);
+      await initializeSnapshotBaseline(state);
     }
     if (loaded.path) ctx.ui.notify(`Duck 已加载配置：${loaded.path}`, "info");
   });
@@ -392,7 +766,7 @@ export default function duckExtension(pi: ExtensionAPI): void {
       }
     }
     return {
-      systemPrompt: `${event.systemPrompt}${MUTATION_POLICY_PROMPT}${CONCISE_MODE_PROMPT}${state?.mode === "on" && state.guided ? GUIDED_MODE_PROMPT : ""}`,
+      systemPrompt: `${event.systemPrompt}${MUTATION_POLICY_PROMPT}${CONCISE_MODE_PROMPT}${state?.mode === "on" && state.guided ? `${GUIDED_MODE_PROMPT}${formatGuidePlanContext(state.guidePlan)}` : ""}`,
     };
   });
 
@@ -407,7 +781,11 @@ export default function duckExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", async () => {
-    if (state) await stopWatcher(state);
+    if (state) {
+      await stopWatcher(state);
+      await state.controlSocket?.close();
+      state.terminalInputUnsubscribe?.();
+    }
     state = undefined;
   });
 
@@ -421,12 +799,13 @@ export default function duckExtension(pi: ExtensionAPI): void {
 
   pi.on("agent_settled", async (_event, ctx) => {
     if (!state) return;
-    state.progressPending = false;
-    await presentPending(pi, ctx, state);
-    if (state.mode === "on" && state.guided && state.guideActive && state.deferredProgressPaths.size > 0) {
-      const paths = new Set(state.deferredProgressPaths);
-      state.deferredProgressPaths.clear();
-      await evaluateBatch(pi, ctx, state, paths);
+    const activeState = state;
+    activeState.progressPending = false;
+    await presentPending(pi, ctx, activeState);
+    if (activeState.mode === "on" && activeState.guided && activeState.guideActive && activeState.deferredProgressPaths.size > 0) {
+      const paths = new Set(activeState.deferredProgressPaths);
+      activeState.deferredProgressPaths.clear();
+      await enqueueChange(activeState, () => evaluateBatch(pi, ctx, activeState, paths));
     }
   });
 
@@ -434,13 +813,35 @@ export default function duckExtension(pi: ExtensionAPI): void {
     description: "切换 Duck 督导，或请求一个问题",
     handler: async (args, ctx) => {
       if (!state) return;
-      const command = args.trim().toLowerCase();
+      const rawCommand = args.trim();
+      const command = rawCommand.toLowerCase();
       if (command === "on") return toggleMode(pi, ctx, state, "on");
       if (command === "off") return toggleMode(pi, ctx, state, "off");
-      if (command === "guide on") return toggleGuidance(ctx, state, true);
-      if (command === "guide off") return toggleGuidance(ctx, state, false);
-      if (command === "guide") return toggleGuidance(ctx, state, !state.guided);
+      if (command === "guide on") return toggleGuidance(pi, ctx, state, true);
+      if (command === "guide off") return toggleGuidance(pi, ctx, state, false);
+      if (command === "guide") return toggleGuidance(pi, ctx, state, !state.guided);
       if (command === "ask") return askNow(pi, ctx, state);
+      if (command === "diff") return sendCurrentDiff(pi, ctx, state);
+      if (command === "socket") {
+        ctx.ui.notify(`Duck 外部控制 socket：${state.controlSocket?.path ?? "不可用"}`, "info");
+        return;
+      }
+      if (command === "plan") {
+        handlePlanCommand("", ctx);
+        return;
+      }
+      if (command === "plan clear") {
+        handlePlanCommand("clear", ctx);
+        return;
+      }
+      if (command.startsWith("plan ")) {
+        handlePlanCommand(rawCommand.slice("plan ".length), ctx);
+        return;
+      }
+      if (command.startsWith("reply")) {
+        handleReplyCommand(rawCommand.slice("reply".length), ctx);
+        return;
+      }
       if (command === "accept") {
         if (state.pending) {
           pi.sendMessage({ customType: "duck-question", content: formatQuestion(state.pending), display: true, details: state.pending }, { triggerTurn: false });
@@ -454,14 +855,88 @@ export default function duckExtension(pi: ExtensionAPI): void {
         ctx.ui.setWidget("duck-question", undefined);
         return;
       }
-      ctx.ui.notify(`Duck 督导${state.mode === "on" ? "已开启" : "已关闭"}；引导模式${state.guided ? "已开启" : "已关闭"}。可用 /duck on、/duck off、/duck guide on、/duck guide off、/duck ask、/duck accept、/duck dismiss。`, "info");
+      ctx.ui.notify(`Duck 督导${state.mode === "on" ? "已开启" : "已关闭"}；引导模式${state.guided ? "已开启" : "已关闭"}。可用 /duck on、/duck off、/duck guide on、/duck guide off、/duck plan、/duck diff、/duck ask、/duck accept、/duck dismiss。`, "info");
     },
   });
 
-  pi.registerShortcut("ctrl+shift+d", {
-    description: "切换 Duck 督导",
-    handler: async (ctx) => {
-      if (state) await toggleMode(pi, ctx, state, state.mode === "on" ? "off" : "on");
+  pi.registerCommand("duck-on", {
+    description: "开启 Duck 自动督导",
+    handler: async (_args, ctx) => {
+      if (state) await toggleMode(pi, ctx, state, "on");
     },
+  });
+
+  pi.registerCommand("duck-off", {
+    description: "关闭 Duck 监控和主动提问",
+    handler: async (_args, ctx) => {
+      if (state) await toggleMode(pi, ctx, state, "off");
+    },
+  });
+
+  pi.registerCommand("duck-guide", {
+    description: "切换或设置 Duck 单步引导模式",
+    handler: async (args, ctx) => {
+      if (!state) return;
+      const mode = args.trim().toLowerCase();
+      if (mode === "on") return toggleGuidance(pi, ctx, state, true);
+      if (mode === "off") return toggleGuidance(pi, ctx, state, false);
+      if (!mode) return toggleGuidance(pi, ctx, state, !state.guided);
+      ctx.ui.notify("用法：/duck-guide [on|off]", "info");
+    },
+  });
+
+  pi.registerCommand("duck-plan", {
+    description: "查看、设置或清除 Duck 引导计划",
+    handler: async (args, ctx) => handlePlanCommand(args, ctx),
+  });
+
+  pi.registerCommand("duck-diff", {
+    description: "主动触发当前工作区进度交接",
+    handler: async (_args, ctx) => {
+      if (state) await sendCurrentDiff(pi, ctx, state);
+    },
+  });
+
+  pi.registerCommand("duck-ask", {
+    description: "立即请求一个 Duck 督导问题",
+    handler: async (_args, ctx) => {
+      if (state) await askNow(pi, ctx, state);
+    },
+  });
+
+  pi.registerCommand("duck-accept", {
+    description: "发布待处理的 Duck 督导问题",
+    handler: async (_args, ctx) => {
+      if (!state?.pending) return;
+      pi.sendMessage({ customType: "duck-question", content: formatQuestion(state.pending), display: true, details: state.pending }, { triggerTurn: false });
+      state.pending = undefined;
+      ctx.ui.setWidget("duck-question", undefined);
+    },
+  });
+
+  pi.registerCommand("duck-dismiss", {
+    description: "忽略待处理的 Duck 督导问题",
+    handler: async (_args, ctx) => {
+      if (!state) return;
+      state.pending = undefined;
+      ctx.ui.setWidget("duck-question", undefined);
+    },
+  });
+
+  pi.registerCommand("duck-reply", {
+    description: "发送 Duck 常用回复",
+    handler: async (args, ctx) => handleReplyCommand(args, ctx),
+  });
+
+  pi.registerCommand("duck-socket", {
+    description: "查看 Duck 外部控制 socket 路径",
+    handler: async (_args, ctx) => {
+      if (state) ctx.ui.notify(`Duck 外部控制 socket：${state.controlSocket?.path ?? "不可用"}`, "info");
+    },
+  });
+
+  pi.registerCommand("help", {
+    description: "查看所有命令或 Duck 专属命令",
+    handler: async (args, ctx) => showHelp(args, ctx),
   });
 }

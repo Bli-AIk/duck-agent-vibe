@@ -3,4 +3,5 @@ node_modules/
 .duck-runtime/
 dist/
 .duck-state/
+__pycache__/
 *.log

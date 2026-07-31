@@ -17,14 +17,32 @@ export interface DuckConfig {
   cooldownMs: number;
   guideCooldownMs: number;
   guideMinChangeScore: number;
+  guideWatchHandoff: boolean;
   largeChangeThreshold: number;
   maxQuestionContextChars: number;
+  guideAutoReadDiff: boolean;
+  maxDiffChars: number;
   keybinding: string;
+  replyShortcuts: ReplyShortcutConfig;
+  controlSocket: string;
   ignore: string[];
   watch: string[];
   diagnostics: DiagnosticSpec[];
   supervisorProvider?: string;
   supervisorModel?: string;
+}
+
+export interface ReplyShortcutConfig {
+  detail: string;
+  next: string;
+  hint: string;
+}
+
+export interface GuidePlan {
+  goal: string;
+  stepNumber: number;
+  lastObservedFiles: string[];
+  lastHandoffAt?: number;
 }
 
 export interface FileSnapshot {
@@ -33,6 +51,7 @@ export interface FileSnapshot {
   size: number;
   lines: number;
   hash: string;
+  content?: string;
 }
 
 export interface ChangeFile {
@@ -41,6 +60,7 @@ export interface ChangeFile {
   addedLines: number;
   deletedLines: number;
   changedBytes: number;
+  lineRanges?: string[];
 }
 
 export interface ChangeSummary {

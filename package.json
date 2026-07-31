@@ -4,7 +4,14 @@
   "private": true,
   "description": "A Pi coding-agent extension that blocks project mutations and asks Socratic questions.",
   "type": "module",
-  "files": ["src", "README.md", ".duck.toml.example", "package.json"],
+  "files": [
+    "src",
+    "README.md",
+    ".duck.toml.example",
+    "duck-control.sh",
+    "duck-compose.sh",
+    "package.json"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
@@ -12,11 +19,15 @@
     "check": "tsc -p tsconfig.json --noEmit"
   },
   "pi": {
-    "extensions": ["./src/index.ts"]
+    "extensions": [
+      "./src/index.ts"
+    ]
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.83.0",
+    "@earendil-works/pi-tui": "^0.83.0",
     "chokidar": "^4.0.3",
+    "diff": "^8.0.4",
     "smol-toml": "^1.4.0"
   },
   "devDependencies": {

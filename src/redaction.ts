@@ -43,6 +43,7 @@ export function buildQuestionContext(root: string, evidence: QuestionEvidence, m
       status: file.status === "modified" ? "已修改" : file.status === "added" ? "已新增" : file.status === "deleted" ? "已删除" : "已重命名",
       addedLines: file.addedLines,
       deletedLines: file.deletedLines,
+      lineRanges: file.lineRanges ?? [],
     })),
     score: evidence.score.value,
     reasons: evidence.score.reasons,
