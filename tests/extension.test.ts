@@ -231,8 +231,9 @@ describe("Pi extension integration", () => {
         assistantMessageEvent: update,
       }, ctx);
 
-      expect(update.delta).toBe("甲".repeat(80));
-      expect(partial.content[0].text).toBe("甲".repeat(80));
+      const hardLimitText = `${"甲".repeat(79)}…`;
+      expect(update.delta).toBe(hardLimitText);
+      expect(partial.content[0].text).toBe(hardLimitText);
 
       const toolCall = { type: "toolCall", id: "tool-1", name: "read", arguments: "{}" };
       const finalized = {
@@ -240,8 +241,16 @@ describe("Pi extension integration", () => {
         content: [{ type: "text", text: longText }, toolCall],
       };
       const result = await handlers.get("message_end")?.({ message: finalized }, ctx);
-      expect(result.message.content[0].text).toBe("甲".repeat(80));
+      expect(result.message.content[0].text).toBe(hardLimitText);
       expect(result.message.content[1]).toEqual(toolCall);
+
+      const naturalText = `${"当前目录是空的，".repeat(8)}。请在 src/main.rs 中完成一个小改动并保存。`;
+      expect([...naturalText].length).toBeGreaterThan(80);
+      const overflowingNaturalText = `${naturalText}${" 其他说明".repeat(60)}`;
+      const naturalResult = await handlers.get("message_end")?.({
+        message: { role: "assistant", content: [{ type: "text", text: overflowingNaturalText }] },
+      }, ctx);
+      expect(naturalResult.message.content[0].text).toBe(naturalText);
 
       await handlers.get("session_shutdown")?.({}, ctx);
     } finally {

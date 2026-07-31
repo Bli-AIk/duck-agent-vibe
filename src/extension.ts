@@ -36,6 +36,7 @@ interface RuntimeState {
 }
 
 const DEFAULT_RESPONSE_LIMIT = 80;
+const RESPONSE_BOUNDARY_OVERFLOW = 80;
 
 const MUTATION_POLICY_PROMPT = `
 
@@ -116,9 +117,26 @@ function codePointLength(value: string): number {
   return [...value].length;
 }
 
-function takeCodePoints(value: string, limit: number): string {
+function isSentenceBoundary(value: string): boolean {
+  return value === "。" || value === "！" || value === "？" || value === "!" || value === "?" || value === "\n";
+}
+
+function truncateTextNaturally(value: string, limit: number): string {
+  const points = [...value];
+  if (points.length <= limit) return value;
   if (limit <= 0) return "";
-  return [...value].slice(0, limit).join("");
+
+  const naturalEnd = Math.min(points.length, limit + RESPONSE_BOUNDARY_OVERFLOW);
+  for (let index = limit; index < naturalEnd; index += 1) {
+    if (isSentenceBoundary(points[index] ?? "")) return points.slice(0, index + 1).join("");
+  }
+
+  for (let index = Math.min(limit, points.length) - 1; index >= 0; index -= 1) {
+    if (isSentenceBoundary(points[index] ?? "")) return points.slice(0, index + 1).join("");
+  }
+
+  const fallback = Math.max(1, limit - 1);
+  return `${points.slice(0, fallback).join("")}…`;
 }
 
 type AssistantContentBlock = { type: string; text?: string };
@@ -133,14 +151,21 @@ function isAssistantContentMessage(message: AgentMessage): message is AssistantC
     && Array.isArray((message as { content?: unknown }).content);
 }
 
+function assistantText(message: AssistantContentMessage): string {
+  return (message.content as AssistantContentBlock[])
+    .filter((block) => block.type === "text" && typeof block.text === "string")
+    .map((block) => block.text as string)
+    .join("");
+}
+
 function constrainAssistantMessage(message: AgentMessage, limit: number): AgentMessage {
   if (!isAssistantContentMessage(message) || !Number.isFinite(limit)) return message;
   let remaining = limit;
   let changed = false;
   const content = message.content.map((block) => {
     if (block.type !== "text" || typeof block.text !== "string") return block;
-    const text = takeCodePoints(block.text, remaining);
-    remaining -= codePointLength(text);
+    const text = truncateTextNaturally(block.text, remaining);
+    if (text !== block.text) remaining = 0;
     if (text !== block.text) changed = true;
     return text === block.text ? block : { ...block, text };
   });
@@ -475,14 +500,17 @@ export default function duckExtension(pi: ExtensionAPI): void {
     if (!state || event.message.role !== "assistant" || !Number.isFinite(state.responseLimit)) return;
     const update = event.assistantMessageEvent;
     if (update.type === "text_delta") {
-      const remaining = Math.max(0, state.responseLimit - state.assistantOutputChars);
-      const visible = takeCodePoints(update.delta, remaining);
+      const partialText = "partial" in update && isAssistantContentMessage(update.partial)
+        ? assistantText(update.partial)
+        : update.delta;
+      const target = truncateTextNaturally(partialText, state.responseLimit);
+      const visible = [...target].slice(state.assistantOutputChars).join("");
       update.delta = visible;
       state.assistantOutputChars += codePointLength(visible);
     }
     constrainAssistantMessageInPlace(event.message, state.responseLimit);
     if ("partial" in update) constrainAssistantMessageInPlace(update.partial, state.responseLimit);
-    if (update.type === "text_end") update.content = takeCodePoints(update.content, state.responseLimit);
+    if (update.type === "text_end") update.content = truncateTextNaturally(update.content, state.responseLimit);
   });
 
   pi.on("session_shutdown", async () => {
