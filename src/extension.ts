@@ -1,4 +1,3 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolResultEvent } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_CONFIG, loadDuckConfig } from "./config.js";
 import { writeAudit } from "./audit.js";
@@ -31,13 +30,9 @@ interface RuntimeState {
   lastProgressAt: number;
   diagnostics: DiagnosticFailure[];
   presenting: boolean;
-  responseLimit: number;
-  assistantOutputChars: number;
 }
 
 const PROMPT_RESPONSE_LIMIT = 80;
-const EMERGENCY_RESPONSE_LIMIT = 240;
-const RESPONSE_BOUNDARY_OVERFLOW = 80;
 
 const MUTATION_POLICY_PROMPT = `
 
@@ -109,76 +104,6 @@ const GUIDED_MODE_PROMPT = `
 `;
 const DUCK_BLOCK_PREFIX = "DUCK POLICY INTERCEPTION:";
 const DUCK_PROGRESS_PREFIX = "[DUCK_PROGRESS_HANDOFF]";
-
-function requestsDetailedReply(prompt: string): boolean {
-  return /详细|展开说明|详细解释|完整教程|逐步解释|长文|detailed|in detail|full tutorial|step[- ]by[- ]step explanation/i.test(prompt);
-}
-
-function codePointLength(value: string): number {
-  return [...value].length;
-}
-
-function isSentenceBoundary(value: string): boolean {
-  return value === "。" || value === "！" || value === "？" || value === "!" || value === "?" || value === "\n";
-}
-
-function truncateTextNaturally(value: string, limit: number): string {
-  const points = [...value];
-  if (points.length <= limit) return value;
-  if (limit <= 0) return "";
-
-  const naturalEnd = Math.min(points.length, limit + RESPONSE_BOUNDARY_OVERFLOW);
-  for (let index = limit; index < naturalEnd; index += 1) {
-    if (isSentenceBoundary(points[index] ?? "")) return points.slice(0, index + 1).join("");
-  }
-
-  for (let index = Math.min(limit, points.length) - 1; index >= 0; index -= 1) {
-    if (isSentenceBoundary(points[index] ?? "")) return points.slice(0, index + 1).join("");
-  }
-
-  const fallback = Math.max(1, limit - 1);
-  return `${points.slice(0, fallback).join("")}…`;
-}
-
-type AssistantContentBlock = { type: string; text?: string };
-type AssistantContentMessage = AgentMessage & {
-  role: "assistant";
-  content: AssistantContentBlock[];
-};
-
-function isAssistantContentMessage(message: AgentMessage): message is AssistantContentMessage {
-  return message.role === "assistant"
-    && "content" in message
-    && Array.isArray((message as { content?: unknown }).content);
-}
-
-function assistantText(message: AssistantContentMessage): string {
-  return (message.content as AssistantContentBlock[])
-    .filter((block) => block.type === "text" && typeof block.text === "string")
-    .map((block) => block.text as string)
-    .join("");
-}
-
-function constrainAssistantMessage(message: AgentMessage, limit: number): AgentMessage {
-  if (!isAssistantContentMessage(message) || !Number.isFinite(limit)) return message;
-  let remaining = limit;
-  let changed = false;
-  const content = message.content.map((block) => {
-    if (block.type !== "text" || typeof block.text !== "string") return block;
-    const text = truncateTextNaturally(block.text, remaining);
-    if (text !== block.text) remaining = 0;
-    if (text !== block.text) changed = true;
-    return text === block.text ? block : { ...block, text };
-  });
-  return changed ? { ...message, content } : message;
-}
-
-function constrainAssistantMessageInPlace(message: AgentMessage, limit: number): void {
-  if (!isAssistantContentMessage(message)) return;
-  const constrained = constrainAssistantMessage(message, limit);
-  if (constrained === message || !isAssistantContentMessage(constrained)) return;
-  (message as unknown as { content: AssistantContentBlock[] }).content = constrained.content;
-}
 
 function textFromContent(content: unknown): string {
   if (!Array.isArray(content)) return "";
@@ -373,8 +298,6 @@ async function handleToolCall(pi: ExtensionAPI, ctx: ExtensionContext, state: Ru
     lastProgressAt: 0,
     diagnostics: [],
     presenting: false,
-    responseLimit: EMERGENCY_RESPONSE_LIMIT,
-    assistantOutputChars: 0,
   };
   const decision = evaluateToolCall(event.toolName, event.input, activeState.mode, activeState.config);
   if (decision.action === "allow") return undefined;
@@ -453,8 +376,6 @@ export default function duckExtension(pi: ExtensionAPI): void {
       lastProgressAt: 0,
       diagnostics: [],
       presenting: false,
-      responseLimit: EMERGENCY_RESPONSE_LIMIT,
-      assistantOutputChars: 0,
     };
     setStatus(ctx, state);
     if (state.mode === "on") {
@@ -466,8 +387,6 @@ export default function duckExtension(pi: ExtensionAPI): void {
 
   pi.on("before_agent_start", (event) => {
     if (state) {
-      state.responseLimit = requestsDetailedReply(event.prompt) ? Number.POSITIVE_INFINITY : EMERGENCY_RESPONSE_LIMIT;
-      state.assistantOutputChars = 0;
       if (state.mode === "on" && state.guided && event.prompt.trim() && !event.prompt.includes(DUCK_PROGRESS_PREFIX)) {
         state.guideActive = true;
       }
@@ -482,36 +401,9 @@ export default function duckExtension(pi: ExtensionAPI): void {
   // decision, not a failed command.
   pi.on("message_end", (event) => {
     const message = event.message;
-    if (state && message.role === "assistant") {
-      const constrained = constrainAssistantMessage(message, state.responseLimit);
-      if (constrained !== message) return { message: constrained };
-    }
     if (message.role !== "toolResult" || !message.isError) return;
     if (!textFromContent(message.content).startsWith(DUCK_BLOCK_PREFIX)) return;
     return { message: { ...message, isError: false } };
-  });
-
-  pi.on("message_start", (event) => {
-    if (state && event.message.role === "assistant") state.assistantOutputChars = 0;
-  });
-
-  // The TUI renders message_update directly. Keep a generous sentence-aware
-  // emergency cap here; the normal 80-character rule remains prompt-driven.
-  pi.on("message_update", (event) => {
-    if (!state || event.message.role !== "assistant" || !Number.isFinite(state.responseLimit)) return;
-    const update = event.assistantMessageEvent;
-    if (update.type === "text_delta") {
-      const partialText = "partial" in update && isAssistantContentMessage(update.partial)
-        ? assistantText(update.partial)
-        : update.delta;
-      const target = truncateTextNaturally(partialText, state.responseLimit);
-      const visible = [...target].slice(state.assistantOutputChars).join("");
-      update.delta = visible;
-      state.assistantOutputChars += codePointLength(visible);
-    }
-    constrainAssistantMessageInPlace(event.message, state.responseLimit);
-    if ("partial" in update) constrainAssistantMessageInPlace(update.partial, state.responseLimit);
-    if (update.type === "text_end") update.content = truncateTextNaturally(update.content, state.responseLimit);
   });
 
   pi.on("session_shutdown", async () => {

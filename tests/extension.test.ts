@@ -186,7 +186,7 @@ describe("Pi extension integration", () => {
     }
   });
 
-  it("constrains streamed and finalized assistant text without dropping tool calls", async () => {
+  it("does not rewrite assistant output at runtime", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "duck-output-limit-"));
     try {
       const { pi, handlers } = createFakePi();
@@ -213,44 +213,12 @@ describe("Pi extension integration", () => {
       } as any;
 
       await handlers.get("session_start")?.({ reason: "startup" }, ctx);
-      const longText = "甲".repeat(320);
-      const partial = {
+      const text = "甲".repeat(320);
+      const assistant = {
         role: "assistant",
-        content: [{ type: "text", text: longText }],
+        content: [{ type: "text", text }],
       };
-      const update = {
-        type: "text_delta",
-        contentIndex: 0,
-        delta: longText,
-        partial,
-      };
-      const message = { role: "assistant", content: partial.content };
-
-      await handlers.get("message_update")?.({
-        message,
-        assistantMessageEvent: update,
-      }, ctx);
-
-      const hardLimitText = `${"甲".repeat(239)}…`;
-      expect(update.delta).toBe(hardLimitText);
-      expect(partial.content[0].text).toBe(hardLimitText);
-
-      const toolCall = { type: "toolCall", id: "tool-1", name: "read", arguments: "{}" };
-      const finalized = {
-        role: "assistant",
-        content: [{ type: "text", text: longText }, toolCall],
-      };
-      const result = await handlers.get("message_end")?.({ message: finalized }, ctx);
-      expect(result.message.content[0].text).toBe(hardLimitText);
-      expect(result.message.content[1]).toEqual(toolCall);
-
-      const naturalText = `${"当前目录是空的，".repeat(8)}。请在 src/main.rs 中完成一个小改动并保存。`;
-      expect([...naturalText].length).toBeGreaterThan(80);
-      const overflowingNaturalText = `${naturalText}${" 其他说明".repeat(60)}`;
-      const naturalResult = await handlers.get("message_end")?.({
-        message: { role: "assistant", content: [{ type: "text", text: overflowingNaturalText }] },
-      }, ctx);
-      expect(naturalResult.message.content[0].text).toBe(naturalText);
+      expect(await handlers.get("message_end")?.({ message: assistant }, ctx)).toBeUndefined();
 
       await handlers.get("session_shutdown")?.({}, ctx);
     } finally {
