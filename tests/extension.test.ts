@@ -107,6 +107,8 @@ describe("Pi extension integration", () => {
       expect(guidedPromptResult.systemPrompt).toContain("检查属于 Duck 的动作");
       expect(guidedPromptResult.systemPrompt).toContain("开发者的引导动作只能是修改并保存一个指定项目文件");
       expect(guidedPromptResult.systemPrompt).toContain("不要额外要求开发者“保存后回复我”");
+      expect(guidedPromptResult.systemPrompt).toContain("不得要求开发者打开页面、点击界面、手动测试");
+      expect(guidedPromptResult.systemPrompt).toContain("开发者动作的文字必须包含具体相对路径");
 
       const result = await handlers.get("tool_call")?.({
         toolName: "write",
