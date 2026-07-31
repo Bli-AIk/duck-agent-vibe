@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { isLockfilePath } from "./artifacts.js";
 import path from "node:path";
 import { gitChangedPaths, gitNumstat, gitPathStatus, isGitIgnored, relativePath } from "./git.js";
 import type { ChangeFile, ChangeSummary, FileSnapshot } from "./types.js";
@@ -41,7 +42,7 @@ export async function collectChangeSummary(
 
   const files: ChangeFile[] = [];
   for (const relative of paths) {
-    if (!relative || relative.startsWith("..") || isGitIgnored(root, relative)) continue;
+    if (!relative || relative.startsWith("..") || isLockfilePath(relative) || isGitIgnored(root, relative)) continue;
     const current = await captureSnapshot(root, relative);
     const previous = baseline.get(relative);
     const gitStats = includeGitChanges ? gitNumstat(root, relative) : undefined;

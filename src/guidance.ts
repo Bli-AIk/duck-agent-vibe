@@ -1,5 +1,6 @@
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
+import { isLockfilePath } from "./artifacts.js";
 import { isSensitivePath, limitText } from "./redaction.js";
 import type { ChangeScore, ChangeSummary, DiagnosticFailure } from "./types.js";
 
@@ -18,19 +19,8 @@ const KNOWN_MANIFEST_FILES = new Set([
   "Package.swift",
 ]);
 
-const LOCKFILE_SUFFIXES = [
-  ".lock",
-  "-lock.json",
-  ".lock.json",
-  ".lock.yaml",
-];
-
 function isProjectManifest(fileName: string): boolean {
   return KNOWN_MANIFEST_FILES.has(fileName) || fileName.endsWith(".csproj") || fileName.endsWith(".fsproj");
-}
-
-function isLockfile(fileName: string): boolean {
-  return LOCKFILE_SUFFIXES.some((suffix) => fileName.endsWith(suffix));
 }
 
 function summarizeManifest(fileName: string, content: string): string {
@@ -58,7 +48,7 @@ export async function collectProjectFacts(root: string): Promise<string> {
   let entries: string[] = [];
   try {
     entries = (await readdir(root, { withFileTypes: true }))
-      .filter((entry) => entry.isFile() && isProjectManifest(entry.name) && !isLockfile(entry.name))
+      .filter((entry) => entry.isFile() && isProjectManifest(entry.name) && !isLockfilePath(entry.name))
       .map((entry) => entry.name)
       .sort();
   } catch {
@@ -120,6 +110,8 @@ export function formatGuidedProgress(
     "受限项目证据（不是完成确认；未发送完整差异，也不使用锁文件作为依赖依据）：",
     projectFacts,
     "文件系统不能证明用户执行了哪个等价命令。只有观察到的文件和项目清单才算证据；依赖只有在项目清单中声明时才算已添加。",
+    "可观察性硬约束：下一步只能是 Duck 自己执行允许的检查、开发者修改并保存指定项目文件后等待新的进度交接，或开发者回答一个问题。禁止把打开、查看、阅读、浏览、准备文件或终端当作步骤。",
+    "最终回复不得承诺尚未执行的 Duck 动作；需要读取或检查时，必须先在当前回合调用工具并使用结果。",
     "请结合当前对话判断当前引导步骤是否已经完成；然后只做一件事：给出一个简短确认和下一步唯一动作，或只问一个阻塞问题。不要展开后续步骤，不要生成完整代码。",
   ].join("\n");
 }

@@ -1,5 +1,6 @@
 import path from "node:path";
 import chokidar, { type FSWatcher } from "chokidar";
+import { isLockfilePath } from "./artifacts.js";
 import { gitRoot, isGitIgnored, relativePath } from "./git.js";
 
 const DEFAULT_IGNORES = [
@@ -68,15 +69,24 @@ export interface ProjectWatcherOptions {
   onBatch: (paths: Set<string>) => void | Promise<void>;
 }
 
-function matchesSpec(relative: string, spec: string): boolean {
+export function matchesSpec(relative: string, spec: string): boolean {
   const normalized = spec.replaceAll("\\", "/").replace(/^\.\//, "");
+  if (!normalized) return false;
   const pattern = normalized.includes("/") ? normalized : `**/${normalized}`;
-  const expression = pattern
-    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-    .replaceAll("**/", "(?:.*/)?")
-    .replaceAll("*", ".*")
-    .replaceAll("?", ".");
-  return new RegExp(`^${expression}$`).test(relative);
+  let expression = "";
+  for (let index = 0; index < pattern.length; index += 1) {
+    if (pattern.startsWith("**/", index)) {
+      expression += "(?:.*/)?";
+      index += 2;
+      continue;
+    }
+    const character = pattern[index];
+    if (character === "*") expression += ".*";
+    else if (character === "?") expression += ".";
+    else expression += character?.replace(/[.+^${}()|[\]\\]/g, "\\$&") ?? "";
+  }
+  // Directory ignore specs such as `target` must cover their descendants too.
+  return new RegExp(`^${expression}(?:/.*)?$`).test(relative);
 }
 
 export class ProjectWatcher {
@@ -98,6 +108,7 @@ export class ProjectWatcher {
       if (relative.startsWith("..")) return true;
       if (!relative) return false;
       if (this.options.watch.some((spec) => matchesSpec(relative, spec))) return false;
+      if (isLockfilePath(relative)) return true;
       if (this.options.ignore.some((spec) => matchesSpec(relative, spec))) return true;
       if (DEFAULT_IGNORES.some((spec) => matchesSpec(relative, spec))) return true;
       return gitRepository && isGitIgnored(this.options.root, relative);

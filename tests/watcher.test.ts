@@ -1,4 +1,18 @@
-import { ChangeBatcher } from "../src/watcher.js";
+import { ChangeBatcher, matchesSpec } from "../src/watcher.js";
+
+describe("watcher ignore specs", () => {
+  it("ignores descendants of directory specs", () => {
+    expect(matchesSpec("target", "target")).toBe(true);
+    expect(matchesSpec("target/debug/deps/example", "target")).toBe(true);
+    expect(matchesSpec("src/main.rs", "target")).toBe(false);
+    expect(matchesSpec("docs/generated/index.md", "docs/generated")).toBe(true);
+  });
+
+  it("keeps filename globs useful at any depth", () => {
+    expect(matchesSpec("src/main.rs", "*.rs")).toBe(true);
+    expect(matchesSpec("src/main.ts", "*.rs")).toBe(false);
+  });
+});
 
 describe("ChangeBatcher", () => {
   beforeEach(() => vi.useFakeTimers());

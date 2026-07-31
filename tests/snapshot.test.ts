@@ -37,4 +37,15 @@ describe("snapshot change summaries", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("does not treat lockfile churn as project progress", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "duck-snapshot-"));
+    try {
+      await writeFile(path.join(root, "Cargo.lock"), "generated\n");
+      const summary = await collectChangeSummary(root, ["Cargo.lock"], new Map(), "snapshot");
+      expect(summary.filesChanged).toBe(0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

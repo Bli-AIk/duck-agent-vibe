@@ -2,7 +2,8 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import duckExtension from "../src/extension.js";
+import duckExtension, { diagnosticFailure } from "../src/extension.js";
+import { DEFAULT_CONFIG } from "../src/config.js";
 
 type Handler = (...args: any[]) => unknown;
 
@@ -27,6 +28,23 @@ function createFakePi() {
 }
 
 describe("Pi extension integration", () => {
+  it("does not turn an informational bash failure into a diagnostic", () => {
+    const failure = diagnosticFailure({
+      toolName: "bash",
+      input: { command: "git status" },
+      isError: true,
+      content: [{ type: "text", text: "not a git repository" }],
+    } as any, DEFAULT_CONFIG);
+    expect(failure).toBeUndefined();
+
+    expect(diagnosticFailure({
+      toolName: "bash",
+      input: { command: "cargo check" },
+      isError: true,
+      content: [{ type: "text", text: "error" }],
+    } as any, DEFAULT_CONFIG)).toMatchObject({ name: "Pi bash", command: "cargo check" });
+  });
+
   it("loads an off session and still blocks project mutations", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "duck-extension-"));
     try {
@@ -68,6 +86,8 @@ describe("Pi extension integration", () => {
       expect(promptResult.systemPrompt).toContain("不是执行失败");
       expect(promptResult.systemPrompt).toContain("硬限制，不是风格建议");
       expect(promptResult.systemPrompt).toContain("最终回复不得超过 100 个汉字");
+      expect(promptResult.systemPrompt).toContain("不要把“打开、查看、阅读、浏览、准备某个文件或终端”当作开发者的引导步骤");
+      expect(promptResult.systemPrompt).toContain("当前回合需要的只读检查必须在最终回复前实际调用并得到结果");
       expect(promptResult.systemPrompt).toContain("/duck guide on");
 
       await commands.get("duck")?.("on", ctx);
@@ -77,6 +97,9 @@ describe("Pi extension integration", () => {
         systemPrompt: "base prompt",
       }, ctx);
       expect(guidedPromptResult.systemPrompt).toContain("每次只给一个下一步动作");
+      expect(guidedPromptResult.systemPrompt).toContain("有 Duck 能观察到的完成信号");
+      expect(guidedPromptResult.systemPrompt).toContain("禁止把“打开、查看、阅读、浏览、准备文件/终端”作为步骤");
+      expect(guidedPromptResult.systemPrompt).toContain("最终回复禁止承诺未执行的“下一步检查/确认/验证/运行”");
 
       const result = await handlers.get("tool_call")?.({
         toolName: "write",

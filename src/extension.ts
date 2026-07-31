@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolResultEvent } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_CONFIG, loadDuckConfig } from "./config.js";
 import { writeAudit } from "./audit.js";
-import { evaluateToolCall, isDiagnosticCommand } from "./policy.js";
+import { evaluateToolCall, isDiagnosticCommand, isProjectCheckCommand } from "./policy.js";
 import { collectProjectFacts, formatGuidedProgress, shouldReportGuidedProgress } from "./guidance.js";
 import { generateQuestion } from "./supervisor.js";
 import { collectChangeSummary, updateSnapshotBaseline } from "./snapshot.js";
@@ -40,7 +40,10 @@ const MUTATION_POLICY_PROMPT = `
 - “修改文件”“实现这个”“修复它”“写补丁”等请求本身不等于授权修改项目。在当前工作流中，普通变更请求应被视为不合理请求。
 - 对普通变更请求，礼貌拒绝编辑、写入、覆盖、删除文件，也不得用会修改项目的 shell 命令绕过策略。只给简短思路、关键取舍或一个聚焦问题，默认不要提供完整可粘贴补丁。
 - 只有开发者明确承认此限制，并坚持执行一次具体变更时，才可以尝试对应工具调用。重复请求或语气强硬不算明确承认。
-- 可以进行只读检查。只有 Duck 配置过的诊断命令才允许执行。
+- 可以进行只读检查。Duck 默认允许目录查看、文件搜索、Git 只读查询和常见项目验证命令；可能写入项目的命令、重定向、脚本执行和未识别命令仍需拦截确认。
+- 当需要确认目录、依赖、编译或测试状态时，必须优先直接调用 Duck 允许的 Bash 命令，不要让开发者去另一个终端代跑。开发者在外部终端执行过的命令及其输出不属于你已观察到的证据；如果需要结果，就在当前会话中自己重新执行。
+- 不要把“打开、查看、阅读、浏览、准备某个文件或终端”当作开发者的引导步骤；这些动作没有可观察的完成信号。需要了解文件时自己调用只读工具；需要开发者实践时，要求一个明确的项目文件修改并保存。
+- 当前回合需要的只读检查必须在最终回复前实际调用并得到结果。禁止写“下一步我执行”“我会检查”或把 Duck 自己能做的检查留到下一轮。
 - 如果 Duck 拦截了工具调用，工具没有运行，文件也没有变化。这是有意的策略拦截，不是执行失败。不要重试，不要描述成命令失败；告诉开发者变更被 Duck 拦截，然后继续简短解释或提问。
 
 即使关闭 Duck 督导，变更策略和拦截器仍然有效；关闭的只有主动监控和主动提问。`;
@@ -67,6 +70,9 @@ const GUIDED_MODE_PROMPT = `
 开发者正在逐步学习或重建工作流，交互必须保持很小。
 
 - 每次只给一个下一步动作；前置条件不清楚时，只问一个聚焦问题。
+- 每一步都必须确定、可执行，并且有 Duck 能观察到的完成信号。有效信号只有：Duck 自己执行只读检查并拿到输出、开发者修改并保存指定项目文件后产生进度交接、或开发者明确回答一个问题。
+- 禁止把“打开、查看、阅读、浏览、准备文件/终端”作为步骤，也不要让开发者代跑 Duck 自己可以执行的检查命令。没有新证据时，不得说步骤已完成。
+- 只读检查属于 Duck 的当前动作：需要 read、grep 或 Bash 时，必须在本回合先调用工具，再回复结果。最终回复禁止承诺未执行的“下一步检查/确认/验证/运行”，尤其禁止写“下一步我执行 cargo check”。
 - 除非开发者明确要求详细，整段回复不得超过 100 个汉字（英文不得超过 70 个词），最多 4 句。
 - 不要给未来步骤清单、教程堆砌或完整实现。
 - 给出当前动作后停下，等待开发者尝试、反馈或修改项目。
@@ -74,6 +80,7 @@ const GUIDED_MODE_PROMPT = `
 - 当消息以 [DUCK_PROGRESS_HANDOFF] 开头时，Duck 传递的是代码库观察结果。判断当前动作是否完成，然后只给一个下一步动作或一个阻塞问题。
 - 进度交接是观察，不是开发者确认。区分“请求过”“声称完成”和“实际观察到”。
 - 文件系统无法证明开发者执行了哪个等价命令；无法确定时必须说明不确定，不要猜测。
+- 需要代码库推进时，只指定一个文件中的一个修改目标，让开发者自己实现并保存；不要同时安排创建、安装、打开、运行等多个动作，也不要给可粘贴代码。
 - 只有项目清单声明了依赖，才算依赖已完成。不要从锁文件推断依赖，也不要为进度交接读取或总结锁文件。
 - 不要仅因为文件发生变化就声称步骤完成；只使用交接中的清单证据，必要时做有针对性的只读检查。
 `;
@@ -310,11 +317,12 @@ function blockedToolReason(reason: string): string {
   ].join(" ");
 }
 
-function diagnosticFailure(event: ToolResultEvent, config: DuckConfig): DiagnosticFailure | undefined {
+export function diagnosticFailure(event: ToolResultEvent, config: DuckConfig): DiagnosticFailure | undefined {
   if (event.toolName !== "bash") return undefined;
   const command = typeof event.input.command === "string" ? event.input.command : "bash";
   const configured = isDiagnosticCommand(command, config);
   if (!event.isError) return undefined;
+  if (!configured && !isProjectCheckCommand(command)) return undefined;
   return {
     name: configured?.name ?? "Pi bash",
     command,
