@@ -35,7 +35,8 @@ interface RuntimeState {
   assistantOutputChars: number;
 }
 
-const DEFAULT_RESPONSE_LIMIT = 80;
+const PROMPT_RESPONSE_LIMIT = 80;
+const EMERGENCY_RESPONSE_LIMIT = 240;
 const RESPONSE_BOUNDARY_OVERFLOW = 80;
 
 const MUTATION_POLICY_PROMPT = `
@@ -67,7 +68,7 @@ const CONCISE_MODE_PROMPT = `
 ## Duck 默认输出契约
 除非开发者明确要求详细、展开、完整教程或完整代码，否则以下是硬限制，不是风格建议：
 
-如果用户没有明确提出上述要求，最终回复不得超过 80 个汉字（英文不得超过 50 个词），最多 3 句。超出即违反 Duck 策略，发送前必须删减。
+如果用户没有明确提出上述要求，最终回复不得超过 ${PROMPT_RESPONSE_LIMIT} 个汉字（英文不得超过 50 个词），最多 3 句。超出即违反 Duck 策略，发送前必须删减。
 
 - 不要使用标题、编号列表、项目列表、总结、后续计划或代码块。
 - 只有在必要时，才使用一个很短的行内命令或例子。
@@ -89,7 +90,7 @@ const GUIDED_MODE_PROMPT = `
 - 禁止把“打开、查看、阅读、浏览、准备文件/终端”作为步骤，也不要让开发者代跑 Duck 自己可以执行的检查命令。没有新证据时，不得说步骤已完成。
 - 只读检查属于 Duck 的当前动作：需要 read、grep 或 Bash 时，必须在本回合先调用工具，再回复结果。最终回复禁止承诺未执行的“下一步检查/确认/验证/运行”，尤其禁止写“下一步我执行 cargo check”。
 - 交接后若需要读取、构建、测试或其他项目检查，检查属于 Duck 的动作：必须在当前回合直接调用对应的只读工具或允许的检查命令；禁止把“执行/运行某命令”交给开发者，也禁止让开发者把输出再发回来。没有调用就不得声称检查结果。
-- 除非开发者明确要求详细，整段回复不得超过 80 个汉字（英文不得超过 50 个词），最多 3 句。
+- 除非开发者明确要求详细，整段回复不得超过 ${PROMPT_RESPONSE_LIMIT} 个汉字（英文不得超过 50 个词），最多 3 句。
 - 不要给未来步骤清单、教程堆砌或完整实现。
 - 给出当前动作后停下，等待开发者尝试、反馈或修改项目。
 - 只有当前动作确实需要时，才给一个很短的命令或例子；不要给长代码块。
@@ -372,7 +373,7 @@ async function handleToolCall(pi: ExtensionAPI, ctx: ExtensionContext, state: Ru
     lastProgressAt: 0,
     diagnostics: [],
     presenting: false,
-    responseLimit: DEFAULT_RESPONSE_LIMIT,
+    responseLimit: EMERGENCY_RESPONSE_LIMIT,
     assistantOutputChars: 0,
   };
   const decision = evaluateToolCall(event.toolName, event.input, activeState.mode, activeState.config);
@@ -452,7 +453,7 @@ export default function duckExtension(pi: ExtensionAPI): void {
       lastProgressAt: 0,
       diagnostics: [],
       presenting: false,
-      responseLimit: DEFAULT_RESPONSE_LIMIT,
+      responseLimit: EMERGENCY_RESPONSE_LIMIT,
       assistantOutputChars: 0,
     };
     setStatus(ctx, state);
@@ -465,7 +466,7 @@ export default function duckExtension(pi: ExtensionAPI): void {
 
   pi.on("before_agent_start", (event) => {
     if (state) {
-      state.responseLimit = requestsDetailedReply(event.prompt) ? Number.POSITIVE_INFINITY : DEFAULT_RESPONSE_LIMIT;
+      state.responseLimit = requestsDetailedReply(event.prompt) ? Number.POSITIVE_INFINITY : EMERGENCY_RESPONSE_LIMIT;
       state.assistantOutputChars = 0;
       if (state.mode === "on" && state.guided && event.prompt.trim() && !event.prompt.includes(DUCK_PROGRESS_PREFIX)) {
         state.guideActive = true;
@@ -494,8 +495,8 @@ export default function duckExtension(pi: ExtensionAPI): void {
     if (state && event.message.role === "assistant") state.assistantOutputChars = 0;
   });
 
-  // The TUI renders message_update directly, so prompt-only length limits are
-  // not enough. Trim visible assistant text while preserving tool calls.
+  // The TUI renders message_update directly. Keep a generous sentence-aware
+  // emergency cap here; the normal 80-character rule remains prompt-driven.
   pi.on("message_update", (event) => {
     if (!state || event.message.role !== "assistant" || !Number.isFinite(state.responseLimit)) return;
     const update = event.assistantMessageEvent;

@@ -213,7 +213,7 @@ describe("Pi extension integration", () => {
       } as any;
 
       await handlers.get("session_start")?.({ reason: "startup" }, ctx);
-      const longText = "甲".repeat(120);
+      const longText = "甲".repeat(320);
       const partial = {
         role: "assistant",
         content: [{ type: "text", text: longText }],
@@ -231,7 +231,7 @@ describe("Pi extension integration", () => {
         assistantMessageEvent: update,
       }, ctx);
 
-      const hardLimitText = `${"甲".repeat(79)}…`;
+      const hardLimitText = `${"甲".repeat(239)}…`;
       expect(update.delta).toBe(hardLimitText);
       expect(partial.content[0].text).toBe(hardLimitText);
 
