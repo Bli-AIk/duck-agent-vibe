@@ -142,7 +142,7 @@ const CONCISE_MODE_PROMPT = `
 - 发送前删除所有可选解释、边界情况、替代方案和后续步骤，直到符合限制。
 - 不要罗列多个方向或把选择题清单交给开发者；能合理默认时直接选一个方向。最多保留一个问题。
 - 只有当前消息明确要求详细、完整回答、展开解释、教程或完整代码时，才允许解除默认字数限制。
-- 如果当前问题适合动手实践且引导模式未开启，最后只简短询问："要不要进入跟踪实践模式？（输入 /duck guide on）"
+- 不要自行推断引导是否开启；提示词末尾附加的“当前交互模式”是唯一状态来源。
 `;
 
 const GUIDED_MODE_PROMPT = `
@@ -280,11 +280,43 @@ function isCooldownOver(state: RuntimeState): boolean {
   return Date.now() - state.lastPromptAt >= state.config.cooldownMs;
 }
 
+function interactionModeLabel(state: RuntimeState): string {
+  const guided = state.mode === "on" && state.guided;
+  const base = guided ? "引导" : "问答";
+  return state.teaching ? base + "+教学" : base;
+}
+
+function formatInteractionModePrompt(state: RuntimeState): string {
+  const guided = state.mode === "on" && state.guided;
+  const lines = [
+    "",
+    "## Duck 当前交互模式（运行时状态，优先于通用建议）",
+    `当前模式：${interactionModeLabel(state)}`,
+    `引导已${guided ? "开启" : "关闭"}；教学已${state.teaching ? "开启" : "关闭"}。`,
+  ];
+
+  if (guided) {
+    lines.push(
+      "当前已经处于引导模式：禁止询问是否进入引导模式，禁止推荐 /duck guide on，也禁止说“要不要进入跟踪实践模式”。",
+    );
+  } else {
+    lines.push(
+      "当前没有进入引导模式；只有开发者明确要求或确实适合实践时，才可用一句话询问是否进入引导。",
+    );
+  }
+
+  if (state.teaching) {
+    lines.push(
+      "当前已经处于教学模式；只有 API 或文档证据触发教学答疑，不要因为普通配置变化自动讲解 API。",
+    );
+  }
+
+  return lines.join("\n");
+}
+
 function setStatus(ctx: ExtensionContext, state: RuntimeState): void {
   const modeLabel = state.mode === "on" ? "开启" : "关闭";
-  const interactionLabel = state.mode === "on" && state.guided ? "引导" : "问答";
-  const modeDescription = state.teaching ? interactionLabel + "+教学" : interactionLabel;
-  ctx.ui.setStatus("duck-supervisor", "Duck " + modeLabel + " | " + modeDescription + " | " + state.root);
+  ctx.ui.setStatus("duck-supervisor", "Duck " + modeLabel + " | " + interactionModeLabel(state) + " | " + state.root);
 }
 
 function shouldRunWatcher(state: RuntimeState): boolean {
@@ -984,6 +1016,7 @@ export default function duckExtension(pi: ExtensionAPI): void {
         CONCISE_MODE_PROMPT,
         state?.mode === "on" && state.guided ? GUIDED_MODE_PROMPT + formatGuidePlanContext(state.guidePlan) : "",
         state?.teaching ? TEACHING_MODE_PROMPT : "",
+        state ? formatInteractionModePrompt(state) : "",
       ].join(""),
     };
   });
@@ -1084,9 +1117,7 @@ export default function duckExtension(pi: ExtensionAPI): void {
         ctx.ui.setWidget("duck-question", undefined);
         return;
       }
-      const interaction = state.mode === "on" && state.guided ? "引导" : "问答";
-      const interactionMode = state.teaching ? interaction + "+教学" : interaction;
-      ctx.ui.notify(`Duck 督导${state.mode === "on" ? "已开启" : "已关闭"}；当前交互模式：${interactionMode}。可用 /duck on、/duck off、/duck guide on、/duck guide off、/duck teach on、/duck teach off、/duck plan、/duck diff、/duck ask、/duck accept、/duck dismiss。`, "info");
+      ctx.ui.notify(`Duck 督导${state.mode === "on" ? "已开启" : "已关闭"}；当前交互模式：${interactionModeLabel(state)}。可用 /duck on、/duck off、/duck guide on、/duck guide off、/duck teach on、/duck teach off、/duck plan、/duck diff、/duck ask、/duck accept、/duck dismiss。`, "info");
     },
   });
 

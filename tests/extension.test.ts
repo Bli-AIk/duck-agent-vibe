@@ -137,7 +137,7 @@ describe("Pi extension integration", () => {
       expect(promptResult.systemPrompt).toContain("默认跟随用户的语言回复");
       expect(promptResult.systemPrompt).toContain("不要把“打开、查看、阅读、浏览、准备某个文件或终端”当作开发者的引导步骤");
       expect(promptResult.systemPrompt).toContain("当前回合需要的只读检查必须在最终回复前实际调用并得到结果");
-      expect(promptResult.systemPrompt).toContain("/duck guide on");
+      expect(promptResult.systemPrompt).toContain("不要自行推断引导是否开启");
 
       await commands.get("duck")?.("on", ctx);
       await commands.get("duck")?.("guide on", ctx);
@@ -151,6 +151,9 @@ describe("Pi extension integration", () => {
       }, ctx);
       expect(teachingPromptResult.systemPrompt).toContain("Duck 教学模式");
       expect(teachingPromptResult.systemPrompt).toContain("每次只给一个下一步动作");
+      expect(teachingPromptResult.systemPrompt).toContain("当前模式：引导+教学");
+      expect(teachingPromptResult.systemPrompt).toContain("禁止询问是否进入引导模式");
+      expect(teachingPromptResult.systemPrompt).not.toContain("最后只简短询问");
       expect(terminalInputHandler?.("\u001b[9;2:3u")).toBeUndefined();
       await new Promise((resolve) => setTimeout(resolve, 20));
       expect(notifications.at(-1)).toContain("Duck 模式已切换为引导+教学");
@@ -184,6 +187,8 @@ describe("Pi extension integration", () => {
       expect(guidedPromptResult.systemPrompt).toContain("offset=8, limit=1");
       expect(guidedPromptResult.systemPrompt).toContain("读取交接列出的变更行之前不得回复开发者");
       expect(guidedPromptResult.systemPrompt).toContain("引导计划为空不是阻塞");
+      expect(guidedPromptResult.systemPrompt).toContain("当前模式：引导");
+      expect(guidedPromptResult.systemPrompt).toContain("禁止询问是否进入引导模式");
 
       const result = await handlers.get("tool_call")?.({
         toolName: "write",
