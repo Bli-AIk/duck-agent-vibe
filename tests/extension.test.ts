@@ -153,6 +153,9 @@ describe("Pi extension integration", () => {
       expect(teachingPromptResult.systemPrompt).toContain("每次只给一个下一步动作");
       expect(teachingPromptResult.systemPrompt).toContain("当前模式：引导+教学");
       expect(teachingPromptResult.systemPrompt).toContain("禁止询问是否进入引导模式");
+      expect(teachingPromptResult.systemPrompt).toContain("可以展示一个短的 Context7 或源码原文代码片段");
+      expect(teachingPromptResult.systemPrompt).toContain("即使技术上可以复制");
+      expect(teachingPromptResult.systemPrompt).toContain("文档无法解释或证据不足时");
       expect(teachingPromptResult.systemPrompt).not.toContain("最后只简短询问");
       expect(terminalInputHandler?.("\u001b[9;2:3u")).toBeUndefined();
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -189,6 +192,7 @@ describe("Pi extension integration", () => {
       expect(guidedPromptResult.systemPrompt).toContain("引导计划为空不是阻塞");
       expect(guidedPromptResult.systemPrompt).toContain("当前模式：引导");
       expect(guidedPromptResult.systemPrompt).toContain("禁止询问是否进入引导模式");
+      expect(guidedPromptResult.systemPrompt).toContain("样板、示例、文档原文、我看看”不是引导步骤");
 
       const result = await handlers.get("tool_call")?.({
         toolName: "write",

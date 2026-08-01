@@ -291,7 +291,7 @@ export function formatContext7Text(details: Context7Details): string {
     "问题：" + details.query,
     "原始文档链接：\n" + sources,
     "原文摘录：\n" + excerpts,
-    "代码原文（仅供对照，不是用户项目补丁）：\n" + code,
+    "代码原文（文档片段，仅供对照，不是用户项目补丁）：\n" + code,
     details.error ? "来源状态：" + details.error : "来源状态：已验证",
   ].join("\n\n");
 }
@@ -306,7 +306,7 @@ export function createContext7Tool(runtime: Context7Runtime): ToolDefinition<typ
       "教学模式发现用户可能不会用 API 时，先调用 duck_context7，再用极简中文解释证据。",
       "一次只查询一个库和一个主题；不要把用户项目代码发送给 Context7。",
       "必须保留工具返回的原始 HTTP(S) 文档链接；没有来源时不要编造确定结论。",
-      "工具中的代码是文档原文，只能用于对照，不能改写成用户项目可粘贴实现。",
+      "工具中的代码是文档原文；用户明确要求样板或示例时，可以展示短片段并保留来源，但不能改写成用户项目补丁、完整实现或粘贴指令。",
     ],
     parameters: CONTEXT7_PARAMETERS,
     renderShell: "self",

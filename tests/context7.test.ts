@@ -55,6 +55,9 @@ describe("Context7 integration", () => {
       "https://github.com/example/lib/blob/main/README.md",
       "https://github.com/example/lib/blob/main/example.ts",
     ]);
+    const tool = createContext7Tool(base);
+    expect(tool.promptGuidelines.join("\n")).toContain("可以展示短片段");
+    expect(tool.promptGuidelines.join("\n")).toContain("不能改写成用户项目补丁");
     expect(calls[0]?.[1]).toBe("library");
     expect(calls[1]?.[1]).toBe("docs");
   });

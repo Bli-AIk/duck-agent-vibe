@@ -45,6 +45,8 @@ describe("teaching candidate detection", () => {
       expect(candidate?.evidence[0]?.lineRanges).toEqual(["1-3"]);
       expect(candidate?.evidence[0]?.excerpt).toContain("2: const element");
       expect(formatTeachingHandoff(candidate!)).toContain("没有发送完整 diff");
+      expect(formatTeachingHandoff(candidate!)).toContain("可以展示 Context7 或源码返回的短代码原文");
+      expect(formatTeachingHandoff(candidate!)).toContain("不要让用户直接粘贴");
       expect(formatTeachingHandoff(candidate!)).not.toContain("package-lock");
     } finally {
       await rm(root, { recursive: true, force: true });
