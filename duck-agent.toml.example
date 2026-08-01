@@ -1,0 +1,8 @@
+# Duck Agent model connection. Do not put the API key here.
+# The key is read from ~/.config/duck-agent/api-key by default.
+
+base_url = "https://your-openai-compatible-endpoint/v1"
+model = "your-model-name"
+
+# Supported values: openai-completions, openai-responses.
+api = "openai-completions"

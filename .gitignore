@@ -1,6 +1,7 @@
 node_modules/
 .npm-cache/
 .duck-runtime/
+duck-agent.toml
 dist/
 .duck-state/
 __pycache__/

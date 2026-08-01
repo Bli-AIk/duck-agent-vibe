@@ -1,6 +1,6 @@
 import type { DiagnosticSpec, DuckConfig, PolicyDecision, SupervisionMode } from "./types.js";
 
-const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
+const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls", "duck_context7"]);
 const DANGEROUS_COMMANDS = [
   /^(?:env\s+)?(?:rm|rmdir|mv|cp|mkdir|touch|tee|truncate|dd|shred|install|chmod|chown|chgrp|ln)\b/i,
   /^(?:env\s+)?(?:sudo|doas|su|kill|pkill|killall|reboot|shutdown)\b/i,

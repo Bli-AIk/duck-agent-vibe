@@ -2,7 +2,7 @@ import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { isLockfilePath } from "./artifacts.js";
 import { isSensitivePath, limitText } from "./redaction.js";
-import type { ChangeScore, ChangeSummary, DiagnosticFailure, GuidePlan } from "./types.js";
+import type { ChangeScore, ChangeSummary, DiagnosticFailure, GuidePlan, TeachingCandidate } from "./types.js";
 
 const KNOWN_MANIFEST_FILES = new Set([
   "Cargo.toml",
@@ -101,6 +101,7 @@ export function formatGuidedProgress(
   projectFacts = "未读取项目清单。",
   diff = "",
   plan?: GuidePlan,
+  teaching?: TeachingCandidate,
 ): string {
   const statusLabels: Record<ChangeSummary["files"][number]["status"], string> = {
     modified: "已修改",
@@ -126,6 +127,16 @@ export function formatGuidedProgress(
   const diffContext = diff
     ? `自动读取的相关差异（用户已在配置中启用，已限长并脱敏）：\n${diff}`
     : "自动读取差异：关闭；本次只发送文件状态、变更行数和项目清单事实。";
+  const teachingContext = teaching
+    ? [
+      "[DUCK_TEACHING_CONTEXT]",
+      "检测到高置信度的 API 学习疑问；不要忽略这个候选证据。",
+      "候选库：" + teaching.library + (teaching.version ? "；版本：" + teaching.version : ""),
+      "文档问题：" + teaching.query,
+      "触发依据：" + teaching.reasons.join("；"),
+      "先调用 duck_context7，再只做文档答疑；不要生成用户项目补丁。",
+    ].join("\n")
+    : "当前没有高置信度 API 教学候选；不要仅因 diff 出现库名而讲课。";
 
   return [
     "[DUCK_PROGRESS_HANDOFF]",
@@ -136,6 +147,7 @@ export function formatGuidedProgress(
     "受限项目证据（不是完成确认；未发送完整差异，也不使用锁文件作为依赖依据）：",
     projectFacts,
     diffContext,
+    teachingContext,
     "文件系统不能证明用户执行了哪个等价命令。只有观察到的文件和项目清单才算证据；依赖只有在项目清单中声明时才算已添加。",
     "变更行范围来自 Duck 的本地文件快照比较，不依赖 Git diff；首次没有旧快照时，范围表示当前文件范围。不要根据 Git 状态猜测具体变更。",
     "交接执行顺序：只要涉及文件带有变更行，先按该文件的精确读取提示调用 read，再判断引导步骤；读取完成前不得回复，也不得先读取整文件。",

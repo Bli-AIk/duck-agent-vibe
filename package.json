@@ -6,8 +6,10 @@
   "type": "module",
   "files": [
     "src",
+    "skills",
     "README.md",
     ".duck.toml.example",
+    "duck-agent.toml.example",
     "duck-control.sh",
     "duck-compose.sh",
     "package.json"
@@ -21,14 +23,19 @@
   "pi": {
     "extensions": [
       "./src/index.ts"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.83.0",
     "@earendil-works/pi-tui": "^0.83.0",
     "chokidar": "^4.0.3",
+    "ctx7": "0.5.7",
     "diff": "^8.0.4",
-    "smol-toml": "^1.4.0"
+    "smol-toml": "^1.4.0",
+    "typebox": "1.3.7"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",

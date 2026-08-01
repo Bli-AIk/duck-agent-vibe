@@ -12,6 +12,8 @@ function createFakePi() {
   const handlers = new Map<string, Handler>();
   const commands = new Map<string, Handler>();
   const shortcuts = new Map<string, Handler>();
+  const tools = new Map<string, unknown>();
+  let activeTools = ["read", "bash", "edit", "write"];
   const entries: unknown[] = [];
   const pi = {
     on(event: string, handler: Handler) {
@@ -23,6 +25,15 @@ function createFakePi() {
     registerShortcut(key: string, options: { handler: Handler }) {
       shortcuts.set(key, options.handler);
     },
+    registerTool(tool: { name: string }) {
+      tools.set(tool.name, tool);
+    },
+    getActiveTools() {
+      return activeTools;
+    },
+    setActiveTools(names: string[]) {
+      activeTools = names;
+    },
     sendMessage: vi.fn(),
     sendUserMessage: vi.fn(),
     appendEntry: vi.fn((customType: string, data: unknown) => {
@@ -30,7 +41,7 @@ function createFakePi() {
     }),
     exec: vi.fn(),
   } as unknown as ExtensionAPI;
-  return { pi, handlers, commands, shortcuts, entries };
+  return { pi, handlers, commands, shortcuts, tools, entries, getActiveTools: () => activeTools };
 }
 
 describe("Pi extension integration", () => {
@@ -96,6 +107,7 @@ describe("Pi extension integration", () => {
       expect(commands.has("duck-on")).toBe(true);
       expect(commands.has("duck-diff")).toBe(true);
       expect(commands.has("help")).toBe(true);
+      expect(shortcuts.has("shift+tab")).toBe(false);
       expect(shortcuts.has("ctrl+shift+d")).toBe(true);
       expect(shortcuts.has("ctrl+alt+m")).toBe(true);
       expect(shortcuts.has("ctrl+alt+n")).toBe(true);
@@ -129,20 +141,28 @@ describe("Pi extension integration", () => {
 
       await commands.get("duck")?.("on", ctx);
       await commands.get("duck")?.("guide on", ctx);
-      const shiftTabPress = "\u001b[9;2:1u";
-      const shiftTabRelease = "\u001b[9;2:3u";
-      expect(terminalInputHandler?.(shiftTabPress)).toEqual({ consume: true });
+      expect(terminalInputHandler?.("\u001b[9;2:1u")).toEqual({ consume: true });
       await new Promise((resolve) => setTimeout(resolve, 20));
-      expect(notifications.at(-1)).toContain("Duck 引导模式已关闭");
-      expect(notifications.at(-2)).not.toContain("Duck 督导已关闭");
-      expect(terminalInputHandler?.(shiftTabRelease)).toBeUndefined();
+      expect(notifications.at(-1)).toContain("Duck 模式已切换为引导+教学");
+      expect(ctx.ui.setStatus).toHaveBeenLastCalledWith("duck-supervisor", expect.stringContaining("引导+教学"));
+      const teachingPromptResult = await handlers.get("before_agent_start")?.({
+        prompt: "explain this API",
+        systemPrompt: "base prompt",
+      }, ctx);
+      expect(teachingPromptResult.systemPrompt).toContain("Duck 教学模式");
+      expect(teachingPromptResult.systemPrompt).toContain("每次只给一个下一步动作");
+      expect(terminalInputHandler?.("\u001b[9;2:3u")).toBeUndefined();
       await new Promise((resolve) => setTimeout(resolve, 20));
-      expect(notifications.at(-1)).toContain("Duck 引导模式已关闭");
-      expect(terminalInputHandler?.(shiftTabPress)).toEqual({ consume: true });
+      expect(notifications.at(-1)).toContain("Duck 模式已切换为引导+教学");
+      expect(terminalInputHandler?.("\u001b[9;2:1u")).toEqual({ consume: true });
       await new Promise((resolve) => setTimeout(resolve, 20));
-      expect(notifications.at(-1)).toContain("Duck 引导模式已开启");
-      expect(terminalInputHandler?.(shiftTabRelease)).toBeUndefined();
+      expect(notifications.at(-1)).toContain("Duck 模式已切换为问答+教学");
+      expect(terminalInputHandler?.("\u001b[9;2:1u")).toEqual({ consume: true });
       await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(notifications.at(-1)).toContain("Duck 模式已切换为问答");
+      expect(terminalInputHandler?.("\u001b[9;2:1u")).toEqual({ consume: true });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(notifications.at(-1)).toContain("Duck 模式已切换为引导");
       const guidedPromptResult = await handlers.get("before_agent_start")?.({
         prompt: "teach me the next step",
         systemPrompt: "base prompt",
@@ -185,6 +205,74 @@ describe("Pi extension integration", () => {
         },
       }, ctx);
       expect(normalizedResult.message.isError).toBe(false);
+      await handlers.get("session_shutdown")?.({}, ctx);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("runs teaching independently when supervision is off and only after an API confusion signal", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "duck-teaching-extension-"));
+    try {
+      await writeFile(path.join(root, ".duck.toml"), [
+        "enabled = false",
+        "teach_enabled = true",
+        "teach_auto_suggest = true",
+        "teach_cooldown_ms = 0",
+        "debounce_ms = 100",
+        "max_batch_ms = 500",
+      ].join("\n"));
+      await writeFile(path.join(root, "package.json"), JSON.stringify({ dependencies: { react: "^19.0.0" } }));
+      await writeFile(path.join(root, "src.ts"), "export const value = 1;\n");
+      const { pi, handlers, commands, tools, getActiveTools } = createFakePi();
+      duckExtension(pi);
+      const ctx = {
+        cwd: root,
+        mode: "tui",
+        hasUI: true,
+        model: undefined,
+        modelRegistry: {},
+        ui: {
+          setStatus: vi.fn(),
+          setWidget: vi.fn(),
+          notify: vi.fn(),
+          select: vi.fn(async () => "保持拦截"),
+          confirm: vi.fn(),
+          input: vi.fn(),
+        },
+        isIdle: () => true,
+        isProjectTrusted: () => true,
+        hasPendingMessages: () => false,
+        signal: undefined,
+      } as any;
+
+      await handlers.get("session_start")?.({ reason: "startup" }, ctx);
+      expect(tools.has("duck_context7")).toBe(true);
+      expect(getActiveTools()).toContain("duck_context7");
+      await expect(handlers.get("tool_call")?.({
+        toolName: "duck_context7",
+        toolCallId: "context7-1",
+        input: { library: "react", query: "createElement API" },
+      }, ctx)).resolves.toBeUndefined();
+      await handlers.get("before_agent_start")?.({
+        prompt: "我不会用 React.createElement 这个 API 怎么办",
+        systemPrompt: "base prompt",
+      }, ctx);
+      await writeFile(path.join(root, "src.ts"), "import React from \"react\";\nconst value = React.createElement(\"div\");\nexport { value };\n");
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      expect(pi.sendMessage.mock.calls.filter(([message]) => (message as any)?.customType === "duck-teaching")).toHaveLength(0);
+      await handlers.get("agent_settled")?.({}, ctx);
+
+      const teaching = pi.sendMessage.mock.calls.filter(([message]) => (message as any)?.customType === "duck-teaching");
+      expect(teaching).toHaveLength(1);
+      expect(teaching[0]?.[0].content).toContain("[DUCK_TEACHING_HANDOFF]");
+      expect(teaching[0]?.[0].content).toContain("React");
+      expect(teaching[0]?.[0].content).toContain("变更行");
+      expect(teaching[0]?.[0].content).not.toContain("package-lock");
+      expect(pi.sendMessage.mock.calls.filter(([message]) => (message as any)?.customType === "duck-progress")).toHaveLength(0);
+
+      await commands.get("duck-teach")?.("off", ctx);
+      expect(getActiveTools()).not.toContain("duck_context7");
       await handlers.get("session_shutdown")?.({}, ctx);
     } finally {
       await rm(root, { recursive: true, force: true });

@@ -1,40 +1,39 @@
-# 将此文件复制到项目根目录并命名为 .duck.toml，以配置项目专属策略。
+# Duck 默认开启变更拦截；主动督导和单步引导仍可分别控制。
 enabled = true
-# 设置为 true 后，会话启动时直接进入单步跟踪实践。
 guide_enabled = false
+
+# 教学模式默认关闭。开启后可在督导关闭时独立监控项目。
+teach_enabled = false
+teach_auto_suggest = true
+teach_cooldown_ms = 30000
+teach_min_change_score = 2
+teach_max_queries_per_turn = 3
+teach_max_excerpt_chars = 2400
+teach_cache_ttl_ms = 600000
+
 debounce_ms = 2000
 max_batch_ms = 30000
 cooldown_ms = 900000
 guide_cooldown_ms = 8000
 guide_min_change_score = 2
-# 默认不因保存/文件变更自动触发引导交接；需要时手动开启。
 guide_watch_handoff = false
+guide_auto_read_diff = false
 large_change_threshold = 12
 max_question_context_chars = 6000
-## 引导模式默认不自动读取完整差异；仅在这里打开后，静默交接才附带受限 diff。
-guide_auto_read_diff = false
 max_diff_chars = 6000
 keybinding = "ctrl+shift+d"
-control_socket = ""
 
 [reply_shortcuts]
 detail = "ctrl+alt+m"
 next = "ctrl+alt+n"
 hint = "ctrl+alt+h"
 
-# 额外的忽略或明确监控模式。默认遵守 Git 忽略规则。
-ignore = ["docs/generated"]
-watch = []
+# 只读检查可以配置为大变更后的自动诊断。
+# [[diagnostics]]
+# name = "项目检查"
+# command = "npm"
+# args = ["test"]
+# auto_on_large_change = true
 
-# 诊断命令默认关闭。已配置命令只被信任可以写入声明的目录，其他 Agent
-# 命令仍然会被拦截。
-[[diagnostics]]
-name = "tests"
-command = "npm"
-args = ["test"]
-allowed_write_dirs = ["coverage", ".cache"]
-auto_on_large_change = false
-
-# 可选的督导模型覆盖。默认使用当前 Pi 模型。
-# supervisor_provider = "anthropic"
-# supervisor_model = "claude-sonnet-4-20250514"
+# ignore = ["docs/generated"]
+# watch = ["src/**"]

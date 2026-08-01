@@ -3,6 +3,7 @@ import { isKeyRelease, matchesKey } from "@earendil-works/pi-tui";
 import { DEFAULT_CONFIG, loadDuckConfig } from "./config.js";
 import { writeAudit } from "./audit.js";
 import { startControlSocket, resolveControlSocketPath, type ControlRequest, type ControlSocket } from "./control.js";
+import { clearExpiredContext7Cache, createContext7Tool, type Context7CacheEntry, type Context7Runtime } from "./context7.js";
 import { buildCurrentDiff } from "./diff.js";
 import { gitChangedPaths } from "./git.js";
 import { evaluateToolCall, isDiagnosticCommand, isProjectCheckCommand } from "./policy.js";
@@ -10,6 +11,7 @@ import { collectProjectFacts, formatGuidedProgress, shouldReportGuidedProgress }
 import { generateQuestion } from "./supervisor.js";
 import { captureSnapshot, collectChangeSummary, updateSnapshotBaseline } from "./snapshot.js";
 import { scoreChange } from "./score.js";
+import { detectTeachingCandidate, formatTeachingHandoff } from "./teaching.js";
 import { ProjectWatcher } from "./watcher.js";
 import type {
   DiagnosticFailure,
@@ -19,6 +21,7 @@ import type {
   QuestionDraft,
   QuestionEvidence,
   SupervisionMode,
+  TeachingCandidate,
 } from "./types.js";
 
 interface RuntimeState {
@@ -27,6 +30,13 @@ interface RuntimeState {
   mode: SupervisionMode;
   guided: boolean;
   guideActive: boolean;
+  teaching: boolean;
+  teachQueriesUsed: number;
+  teachCache: Map<string, Context7CacheEntry>;
+  lastTeachAt: number;
+  recentPrompt: string;
+  teachingBaseline: Map<string, FileSnapshot>;
+  pendingTeachingPaths: Set<string>;
   progressPending: boolean;
   deferredProgressPaths: Set<string>;
   watcher?: ProjectWatcher;
@@ -83,6 +93,8 @@ const DUCK_HELP_COMMANDS = [
   ["duck-on", "开启自动督导"],
   ["duck-off", "关闭监控和主动提问，保留变更拦截"],
   ["duck-guide", "切换或设置单步引导模式"],
+  ["duck-teach", "切换或查看文档教学模式"],
+  ["shift+tab", "循环切换问答、引导、引导+教学、问答+教学"],
   ["duck-plan", "查看、设置或清除引导计划"],
   ["duck-diff", "主动触发当前工作区进度交接"],
   ["duck-ask", "立即请求一个督导问题"],
@@ -168,6 +180,20 @@ const GUIDED_MODE_PROMPT = `
 `;
 const DUCK_BLOCK_PREFIX = "DUCK POLICY INTERCEPTION:";
 const DUCK_PROGRESS_PREFIX = "[DUCK_PROGRESS_HANDOFF]";
+const DUCK_TEACHING_PREFIX = "[DUCK_TEACHING_HANDOFF]";
+const TEACHING_MODE_PROMPT = [
+  "",
+  "## Duck 教学模式",
+  "教学模式是独立状态，默认关闭；它可以在督导关闭时单独运行文件 watcher。",
+  "",
+  "- 只有收到 [DUCK_TEACHING_HANDOFF]，或开发者明确询问某个 API/文档时，才进入文档答疑。",
+  "- 变更里出现库名只是候选证据，不等于开发者不会用；不要因为普通 diff 自动讲课。",
+  "- 收到教学交接后，先用 duck_context7 查询一个具体库和一个主题，再回答当前疑问。",
+  "- 教学答复必须区分：Context7 原始文档链接和原文摘录；结合当前变更的极简解释；一个必要的澄清问题。",
+  "- 不得编造来源、版本或文档结论。没有可验证 HTTP(S) 来源时，明确说证据不足。",
+  "- Context7 返回的代码是文档原文，只用于对照；不要生成用户项目补丁、完整实现或可直接粘贴代码。",
+  "- 除非开发者明确要求详细，教学答复仍遵守 80 个汉字、最多 3 句的限制；不要主动安排下一步实践。",
+].join("\n");
 
 function textFromContent(content: unknown): string {
   if (!Array.isArray(content)) return "";
@@ -256,8 +282,26 @@ function isCooldownOver(state: RuntimeState): boolean {
 
 function setStatus(ctx: ExtensionContext, state: RuntimeState): void {
   const modeLabel = state.mode === "on" ? "开启" : "关闭";
-  const guideLabel = state.mode === "on" && state.guided ? "引导" : "问答";
-  ctx.ui.setStatus("duck-supervisor", `Duck ${modeLabel} | ${guideLabel} | ${state.root}`);
+  const interactionLabel = state.mode === "on" && state.guided ? "引导" : "问答";
+  const modeDescription = state.teaching ? interactionLabel + "+教学" : interactionLabel;
+  ctx.ui.setStatus("duck-supervisor", "Duck " + modeLabel + " | " + modeDescription + " | " + state.root);
+}
+
+function shouldRunWatcher(state: RuntimeState): boolean {
+  return state.mode === "on" || state.teaching;
+}
+
+function setContext7Active(pi: ExtensionAPI, enabled: boolean): void {
+  try {
+    if (typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") return;
+    const active = pi.getActiveTools();
+    const next = enabled
+      ? [...new Set([...active, "duck_context7"])]
+      : active.filter((name) => name !== "duck_context7");
+    pi.setActiveTools(next);
+  } catch {
+    // Older Pi builds may not expose dynamic tool activation.
+  }
 }
 
 async function stopWatcher(state: RuntimeState): Promise<void> {
@@ -302,8 +346,13 @@ async function sendProgressHandoff(
   summary: Awaited<ReturnType<typeof collectChangeSummary>>,
   score: ReturnType<typeof scoreChange>,
   failures: DiagnosticFailure[],
+  teachingCandidate?: TeachingCandidate,
 ): Promise<void> {
   const guided = state.mode === "on" && state.guided && state.guideActive;
+  if (teachingCandidate) {
+    state.lastTeachAt = Date.now();
+    clearExpiredContext7Cache(state.teachCache);
+  }
   if (guided) {
     state.progressPending = true;
     state.lastProgressAt = Date.now();
@@ -327,11 +376,64 @@ async function sendProgressHandoff(
 
   pi.sendMessage({
     customType: "duck-progress",
-    content: formatGuidedProgress(summary, score, failures, projectFacts, automaticDiff, nextPlan),
+    content: formatGuidedProgress(summary, score, failures, projectFacts, automaticDiff, nextPlan, teachingCandidate),
     display: false,
-    details: { summary, score },
+    details: { summary, score, teachingCandidate },
   }, { triggerTurn: true, deliverAs: "followUp" });
   ctx.ui.notify("Duck 已将当前代码库进度传递给 AI", "info");
+}
+
+async function sendTeachingHandoff(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  state: RuntimeState,
+  candidate: TeachingCandidate,
+): Promise<void> {
+  state.lastTeachAt = Date.now();
+  clearExpiredContext7Cache(state.teachCache);
+  pi.sendMessage({
+    customType: "duck-teaching",
+    content: formatTeachingHandoff(candidate),
+    display: false,
+    details: candidate,
+  }, { triggerTurn: true, deliverAs: "followUp" });
+  ctx.ui.notify("Duck 已发现可能的 API 疑问，交给文档答疑", "info");
+}
+
+async function probeTeachingSummary(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  state: RuntimeState,
+  summary: Awaited<ReturnType<typeof collectChangeSummary>>,
+  paths: Set<string>,
+  failures: DiagnosticFailure[],
+  sendCandidate = true,
+): Promise<TeachingCandidate | undefined> {
+  if (!state.teaching || !state.config.teachAutoSuggest) return undefined;
+
+  const prompt = state.recentPrompt;
+  state.recentPrompt = "";
+  const candidate = summary.filesChanged > 0 && Date.now() - state.lastTeachAt >= state.config.teachCooldownMs
+    ? await detectTeachingCandidate(state.root, summary, state.teachingBaseline, prompt, failures, state.config)
+    : undefined;
+
+  const observed = new Set([...paths, ...summary.files.map((file) => file.path)]);
+  await updateSnapshotBaseline(state.root, observed, state.teachingBaseline);
+  for (const relative of paths) state.pendingTeachingPaths.delete(relative);
+  if (candidate && sendCandidate) await sendTeachingHandoff(pi, ctx, state, candidate);
+  return candidate;
+}
+
+async function probeTeachingChanges(pi: ExtensionAPI, ctx: ExtensionContext, state: RuntimeState, paths: Set<string>): Promise<void> {
+  if (!state.teaching) return;
+  if (paths.size === 0) {
+    state.recentPrompt = "";
+    return;
+  }
+  const summary = await collectChangeSummary(state.root, paths, state.teachingBaseline, "snapshot", false);
+  const failures = [...state.diagnostics];
+  state.diagnostics = [];
+  await probeTeachingSummary(pi, ctx, state, summary, paths, failures);
 }
 
 async function evaluateBatch(
@@ -341,8 +443,9 @@ async function evaluateBatch(
   paths: Set<string>,
   comparisonBaseline: ReadonlyMap<string, FileSnapshot> = state.baseline,
 ): Promise<void> {
-  if (state.mode !== "on") return;
+  if (state.mode !== "on" && !state.teaching) return;
   for (const path of paths) state.observedPaths.add(path);
+  if (state.teaching) for (const path of paths) state.pendingTeachingPaths.add(path);
   const guidedBatch = state.guided && state.guideActive;
   const excludedManualPaths = new Set<string>();
   for (const [relative, acknowledged] of state.manualDiffAcknowledged) {
@@ -355,7 +458,6 @@ async function evaluateBatch(
   }
   const summary = await collectChangeSummary(state.root, paths, comparisonBaseline, "snapshot", !guidedBatch, excludedManualPaths);
   if (summary.filesChanged === 0) return;
-  if (guidedBatch && !state.config.guideWatchHandoff) return;
   const score = scoreChange(summary, state.config.largeChangeThreshold);
   const failures = [...state.diagnostics];
   state.diagnostics = [];
@@ -364,8 +466,6 @@ async function evaluateBatch(
     for (const path of paths) state.deferredProgressPaths.add(path);
     return;
   }
-
-  await updateSnapshotBaseline(state.root, summary.files.map((file) => file.path), state.baseline);
 
   if (score.large) {
     for (const diagnostic of state.config.diagnostics.filter((item) => item.autoOnLargeChange)) {
@@ -385,19 +485,29 @@ async function evaluateBatch(
     }
   }
 
+  if (guidedBatch && !state.config.guideWatchHandoff || state.mode !== "on") return;
+  await updateSnapshotBaseline(state.root, summary.files.map((file) => file.path), state.baseline);
+
   if (guidedBatch) {
-    if (!shouldReportGuidedProgress(
+    const shouldSendProgress = state.config.guideWatchHandoff && shouldReportGuidedProgress(
       score,
       failures,
       Date.now(),
       state.lastProgressAt,
       state.config.guideCooldownMs,
       state.config.guideMinChangeScore,
-    )) return;
-    await sendProgressHandoff(pi, ctx, state, summary, score, failures);
+    );
+    if (shouldSendProgress) {
+      const teachingCandidate = state.teaching && state.config.teachAutoSuggest
+        ? await probeTeachingSummary(pi, ctx, state, summary, paths, failures, false)
+        : undefined;
+      await sendProgressHandoff(pi, ctx, state, summary, score, failures, teachingCandidate);
+      return;
+    }
     return;
   }
 
+  if (state.mode !== "on") return;
   if ((!score.large && failures.length === 0) || !isCooldownOver(state) || state.pending) return;
   const evidence: QuestionEvidence = { summary, score, diagnostics: failures };
   state.pending = await generateQuestion(ctx, state.root, evidence, state.config);
@@ -409,19 +519,26 @@ async function sendCurrentDiffNow(pi: ExtensionAPI, ctx: ExtensionContext, state
   const watchedPaths = state.watcher ? await state.watcher.currentPaths() : new Set<string>();
   const paths = new Set([...state.observedPaths, ...watchedPaths, ...gitChangedPaths(state.root)]);
   const summary = await collectChangeSummary(state.root, paths, state.baseline, "snapshot", false);
-  if (summary.filesChanged === 0) {
+  const failures = [...state.diagnostics];
+  state.diagnostics = [];
+  const teachingSummary = state.teaching && state.config.teachAutoSuggest
+    ? await collectChangeSummary(state.root, paths, state.teachingBaseline, "snapshot", false)
+    : undefined;
+  const teachingCandidate = teachingSummary
+    ? await probeTeachingSummary(pi, ctx, state, teachingSummary, paths, failures, false)
+    : undefined;
+  const handoffSummary = summary.filesChanged > 0 ? summary : teachingSummary;
+  if (!handoffSummary || handoffSummary.filesChanged === 0) {
     ctx.ui.notify("Duck 未发现当前工作区变更", "info");
     return;
   }
-  const score = scoreChange(summary, state.config.largeChangeThreshold);
-  const failures = [...state.diagnostics];
-  state.diagnostics = [];
+  const score = scoreChange(handoffSummary, state.config.largeChangeThreshold);
   await updateSnapshotBaseline(state.root, summary.files.map((file) => file.path), state.baseline);
   for (const file of summary.files) {
     const snapshot = state.baseline.get(file.path);
     if (snapshot) state.manualDiffAcknowledged.set(file.path, snapshot);
   }
-  await sendProgressHandoff(pi, ctx, state, summary, score, failures);
+  await sendProgressHandoff(pi, ctx, state, handoffSummary, score, failures, teachingCandidate);
 }
 
 function sendCurrentDiff(pi: ExtensionAPI, ctx: ExtensionContext, state: RuntimeState): Promise<void> {
@@ -448,11 +565,18 @@ async function askNow(pi: ExtensionAPI, ctx: ExtensionContext, state: RuntimeSta
 
 async function toggleMode(pi: ExtensionAPI, ctx: ExtensionContext, state: RuntimeState, mode: SupervisionMode): Promise<void> {
   state.mode = mode;
-  if (mode === "on") {
-    state.guideActive = state.guided;
+  if (mode === "off") {
+    state.guideActive = false;
+    state.pending = undefined;
+    state.progressPending = false;
+    state.deferredProgressPaths.clear();
+    ctx.ui.setWidget("duck-question", undefined);
+  }
+  if (shouldRunWatcher(state)) {
+    state.guideActive = mode === "on" && state.guided;
     state.watcher ??= createWatcher(pi, ctx, state);
     state.watcher.start();
-    await initializeGuidedHandoff(pi, ctx, state, true);
+    if (mode === "on") await initializeGuidedHandoff(pi, ctx, state, true);
     await initializeSnapshotBaseline(state);
   } else {
     state.guideActive = false;
@@ -481,6 +605,8 @@ async function initializeSnapshotBaseline(state: RuntimeState): Promise<void> {
   if (paths.size === 0) return;
   for (const relative of paths) state.observedPaths.add(relative);
   await updateSnapshotBaseline(state.root, paths, state.baseline);
+  await updateSnapshotBaseline(state.root, paths, state.teachingBaseline);
+  state.pendingTeachingPaths.clear();
 }
 
 async function initializeGuidedHandoff(pi: ExtensionAPI, ctx: ExtensionContext, state: RuntimeState, force = false): Promise<void> {
@@ -505,6 +631,53 @@ async function toggleGuidance(pi: ExtensionAPI, ctx: ExtensionContext, state: Ru
   ctx.ui.notify(`Duck 引导模式已${enabled ? "开启" : "关闭"}`, "info");
   await initializeGuidedHandoff(pi, ctx, state, enabled);
   if (enabled) await initializeSnapshotBaseline(state);
+}
+
+async function toggleTeaching(pi: ExtensionAPI, ctx: ExtensionContext, state: RuntimeState, enabled: boolean): Promise<void> {
+  state.teaching = enabled;
+  state.teachQueriesUsed = 0;
+  setContext7Active(pi, enabled);
+  if (shouldRunWatcher(state)) {
+    state.watcher ??= createWatcher(pi, ctx, state);
+    state.watcher.start();
+    await initializeSnapshotBaseline(state);
+  } else {
+    await stopWatcher(state);
+  }
+  setStatus(ctx, state);
+  ctx.ui.notify("Duck 教学模式已" + (enabled ? "开启" : "关闭"), "info");
+}
+
+async function cycleInteractionMode(pi: ExtensionAPI, ctx: ExtensionContext, state: RuntimeState): Promise<void> {
+  const next = state.guided
+    ? state.teaching ? "teaching" : "guidedTeaching"
+    : state.teaching ? "qa" : "guided";
+  state.guided = next === "guided" || next === "guidedTeaching";
+  state.guideActive = state.mode === "on" && state.guided;
+  state.teaching = next === "teaching" || next === "guidedTeaching";
+  state.progressPending = false;
+  state.deferredProgressPaths.clear();
+  state.pending = undefined;
+  ctx.ui.setWidget("duck-question", undefined);
+  setContext7Active(pi, state.teaching);
+
+  if (shouldRunWatcher(state)) {
+    state.watcher ??= createWatcher(pi, ctx, state);
+    state.watcher.start();
+    if (next === "guided") await initializeGuidedHandoff(pi, ctx, state, true);
+    await initializeSnapshotBaseline(state);
+  } else {
+    await stopWatcher(state);
+  }
+  setStatus(ctx, state);
+  const label = next === "guided"
+    ? "引导"
+    : next === "guidedTeaching"
+      ? "引导+教学"
+      : next === "teaching"
+        ? "问答+教学"
+        : "问答";
+  ctx.ui.notify("Duck 模式已切换为" + label, "info");
 }
 
 function createWatcher(pi: ExtensionAPI, ctx: ExtensionContext, state: RuntimeState): ProjectWatcher {
@@ -551,6 +724,13 @@ async function handleToolCall(pi: ExtensionAPI, ctx: ExtensionContext, state: Ru
     mode: "on" as const,
     guided: false,
     guideActive: false,
+    teaching: false,
+    teachQueriesUsed: 0,
+    teachCache: new Map(),
+    lastTeachAt: 0,
+    recentPrompt: "",
+    teachingBaseline: new Map(),
+    pendingTeachingPaths: new Set(),
     progressPending: false,
     deferredProgressPaths: new Set(),
     baseline: new Map(),
@@ -618,6 +798,26 @@ export function diagnosticFailure(event: ToolResultEvent, config: DuckConfig): D
 export default function duckExtension(pi: ExtensionAPI): void {
   let state: RuntimeState | undefined;
   const registeredShortcuts = new Set<string>();
+  const fallbackTeachCache = new Map<string, Context7CacheEntry>();
+  const context7Runtime: Context7Runtime = {
+    isEnabled: () => Boolean(state?.teaching),
+    root: () => state?.root ?? process.cwd(),
+    config: () => {
+      const config = state?.config ?? DEFAULT_CONFIG;
+      return {
+        maxQueriesPerTurn: config.teachMaxQueriesPerTurn,
+        maxExcerptChars: config.teachMaxExcerptChars,
+        cacheTtlMs: config.teachCacheTtlMs,
+      };
+    },
+    cache: () => state?.teachCache ?? fallbackTeachCache,
+    queriesUsed: () => state?.teachQueriesUsed ?? 0,
+    markQuery: () => {
+      if (state) state.teachQueriesUsed += 1;
+    },
+    exec: (command, args, options) => pi.exec(command, args, options),
+  };
+  if (typeof pi.registerTool === "function") pi.registerTool(createContext7Tool(context7Runtime));
 
   const registerShortcut = (key: string, description: string, handler: (ctx: ExtensionContext) => void | Promise<void>): void => {
     const normalized = key.trim();
@@ -728,6 +928,13 @@ export default function duckExtension(pi: ExtensionAPI): void {
       mode: loaded.config.enabled ? "on" : "off",
       guided: loaded.config.guideEnabled,
       guideActive: loaded.config.enabled && loaded.config.guideEnabled,
+      teaching: loaded.config.teachEnabled,
+      teachQueriesUsed: 0,
+      teachCache: new Map(),
+      lastTeachAt: 0,
+      recentPrompt: "",
+      teachingBaseline: new Map(),
+      pendingTeachingPaths: new Set(),
       progressPending: false,
       deferredProgressPaths: new Set(),
       baseline: new Map(),
@@ -743,17 +950,18 @@ export default function duckExtension(pi: ExtensionAPI): void {
     if (typeof ctx.ui.onTerminalInput === "function") {
       state.terminalInputUnsubscribe = ctx.ui.onTerminalInput((data) => {
         if (isKeyRelease(data) || !matchesKey(data, "shift+tab")) return undefined;
-        void toggleGuidance(pi, ctx, state!, !state!.guided);
+        void cycleInteractionMode(pi, ctx, state!);
         return { consume: true };
       });
     }
     registerConfiguredShortcuts(state.config);
     setStatus(ctx, state);
     await startControl(pi, ctx, state);
-    if (state.mode === "on") {
+    setContext7Active(pi, state.teaching);
+    if (shouldRunWatcher(state)) {
       state.watcher = createWatcher(pi, ctx, state);
       state.watcher.start();
-      await initializeGuidedHandoff(pi, ctx, state);
+      if (state.mode === "on") await initializeGuidedHandoff(pi, ctx, state);
       await initializeSnapshotBaseline(state);
     }
     if (loaded.path) ctx.ui.notify(`Duck 已加载配置：${loaded.path}`, "info");
@@ -761,12 +969,22 @@ export default function duckExtension(pi: ExtensionAPI): void {
 
   pi.on("before_agent_start", (event) => {
     if (state) {
+      state.teachQueriesUsed = 0;
+      if (event.prompt.trim() && !event.prompt.includes(DUCK_PROGRESS_PREFIX) && !event.prompt.includes(DUCK_TEACHING_PREFIX)) {
+        state.recentPrompt = event.prompt;
+      }
       if (state.mode === "on" && state.guided && event.prompt.trim() && !event.prompt.includes(DUCK_PROGRESS_PREFIX)) {
         state.guideActive = true;
       }
     }
     return {
-      systemPrompt: `${event.systemPrompt}${MUTATION_POLICY_PROMPT}${CONCISE_MODE_PROMPT}${state?.mode === "on" && state.guided ? `${GUIDED_MODE_PROMPT}${formatGuidePlanContext(state.guidePlan)}` : ""}`,
+      systemPrompt: [
+        event.systemPrompt,
+        MUTATION_POLICY_PROMPT,
+        CONCISE_MODE_PROMPT,
+        state?.mode === "on" && state.guided ? GUIDED_MODE_PROMPT + formatGuidePlanContext(state.guidePlan) : "",
+        state?.teaching ? TEACHING_MODE_PROMPT : "",
+      ].join(""),
     };
   });
 
@@ -807,6 +1025,10 @@ export default function duckExtension(pi: ExtensionAPI): void {
       activeState.deferredProgressPaths.clear();
       await enqueueChange(activeState, () => evaluateBatch(pi, ctx, activeState, paths));
     }
+    if (activeState.teaching) {
+      const paths = new Set(activeState.pendingTeachingPaths);
+      await enqueueChange(activeState, () => probeTeachingChanges(pi, ctx, activeState, paths));
+    }
   });
 
   pi.registerCommand("duck", {
@@ -820,6 +1042,13 @@ export default function duckExtension(pi: ExtensionAPI): void {
       if (command === "guide on") return toggleGuidance(pi, ctx, state, true);
       if (command === "guide off") return toggleGuidance(pi, ctx, state, false);
       if (command === "guide") return toggleGuidance(pi, ctx, state, !state.guided);
+      if (command === "teach on") return toggleTeaching(pi, ctx, state, true);
+      if (command === "teach off") return toggleTeaching(pi, ctx, state, false);
+      if (command === "teach status") {
+        ctx.ui.notify("Duck 教学模式：" + (state.teaching ? "开启" : "关闭"), "info");
+        return;
+      }
+      if (command === "teach") return toggleTeaching(pi, ctx, state, !state.teaching);
       if (command === "ask") return askNow(pi, ctx, state);
       if (command === "diff") return sendCurrentDiff(pi, ctx, state);
       if (command === "socket") {
@@ -855,7 +1084,9 @@ export default function duckExtension(pi: ExtensionAPI): void {
         ctx.ui.setWidget("duck-question", undefined);
         return;
       }
-      ctx.ui.notify(`Duck 督导${state.mode === "on" ? "已开启" : "已关闭"}；引导模式${state.guided ? "已开启" : "已关闭"}。可用 /duck on、/duck off、/duck guide on、/duck guide off、/duck plan、/duck diff、/duck ask、/duck accept、/duck dismiss。`, "info");
+      const interaction = state.mode === "on" && state.guided ? "引导" : "问答";
+      const interactionMode = state.teaching ? interaction + "+教学" : interaction;
+      ctx.ui.notify(`Duck 督导${state.mode === "on" ? "已开启" : "已关闭"}；当前交互模式：${interactionMode}。可用 /duck on、/duck off、/duck guide on、/duck guide off、/duck teach on、/duck teach off、/duck plan、/duck diff、/duck ask、/duck accept、/duck dismiss。`, "info");
     },
   });
 
@@ -882,6 +1113,22 @@ export default function duckExtension(pi: ExtensionAPI): void {
       if (mode === "off") return toggleGuidance(pi, ctx, state, false);
       if (!mode) return toggleGuidance(pi, ctx, state, !state.guided);
       ctx.ui.notify("用法：/duck-guide [on|off]", "info");
+    },
+  });
+
+  pi.registerCommand("duck-teach", {
+    description: "切换或查看 Duck 文档教学模式",
+    handler: async (args, ctx) => {
+      if (!state) return;
+      const mode = args.trim().toLowerCase();
+      if (mode === "on") return toggleTeaching(pi, ctx, state, true);
+      if (mode === "off") return toggleTeaching(pi, ctx, state, false);
+      if (mode === "status") {
+        ctx.ui.notify("Duck 教学模式：" + (state.teaching ? "开启" : "关闭"), "info");
+        return;
+      }
+      if (!mode) return toggleTeaching(pi, ctx, state, !state.teaching);
+      ctx.ui.notify("用法：/duck-teach [on|off|status]", "info");
     },
   });
 

@@ -10,6 +10,9 @@ describe("loadDuckConfig", () => {
       const result = await loadDuckConfig(root);
       expect(result.config.enabled).toBe(true);
       expect(result.config.guideEnabled).toBe(false);
+      expect(result.config.teachEnabled).toBe(false);
+      expect(result.config.teachAutoSuggest).toBe(true);
+      expect(result.config.teachMaxQueriesPerTurn).toBe(3);
       expect(result.config.guideWatchHandoff).toBe(false);
       expect(result.config.guideAutoReadDiff).toBe(false);
       expect(result.config.replyShortcuts.detail).toBe("ctrl+alt+m");
@@ -26,6 +29,13 @@ describe("loadDuckConfig", () => {
       await writeFile(path.join(root, ".duck.toml"), `
 enabled = false
 guide_enabled = false
+teach_enabled = true
+teach_auto_suggest = false
+teach_cooldown_ms = 1200
+teach_min_change_score = 4
+teach_max_queries_per_turn = 9
+teach_max_excerpt_chars = 800
+teach_cache_ttl_ms = 2000
 debounce_ms = 900
 guide_cooldown_ms = 12000
 guide_min_change_score = 3
@@ -51,6 +61,13 @@ auto_on_large_change = true
       const result = await loadDuckConfig(root);
       expect(result.config.enabled).toBe(false);
       expect(result.config.guideEnabled).toBe(false);
+      expect(result.config.teachEnabled).toBe(true);
+      expect(result.config.teachAutoSuggest).toBe(false);
+      expect(result.config.teachCooldownMs).toBe(1200);
+      expect(result.config.teachMinChangeScore).toBe(4);
+      expect(result.config.teachMaxQueriesPerTurn).toBe(3);
+      expect(result.config.teachMaxExcerptChars).toBe(800);
+      expect(result.config.teachCacheTtlMs).toBe(2000);
       expect(result.config.debounceMs).toBe(900);
       expect(result.config.guideCooldownMs).toBe(12000);
       expect(result.config.guideMinChangeScore).toBe(3);

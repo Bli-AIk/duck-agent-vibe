@@ -1,10 +1,12 @@
 export { default } from "./extension.js";
 export * from "./config.js";
+export * from "./context7.js";
 export * from "./control.js";
 export * from "./diff.js";
 export * from "./guidance.js";
 export * from "./policy.js";
 export * from "./score.js";
 export * from "./snapshot.js";
+export * from "./teaching.js";
 export * from "./types.js";
 export * from "./watcher.js";

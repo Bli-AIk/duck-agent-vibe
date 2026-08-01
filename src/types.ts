@@ -12,6 +12,13 @@ export interface DiagnosticSpec {
 export interface DuckConfig {
   enabled: boolean;
   guideEnabled: boolean;
+  teachEnabled: boolean;
+  teachAutoSuggest: boolean;
+  teachCooldownMs: number;
+  teachMinChangeScore: number;
+  teachMaxQueriesPerTurn: number;
+  teachMaxExcerptChars: number;
+  teachCacheTtlMs: number;
   debounceMs: number;
   maxBatchMs: number;
   cooldownMs: number;
@@ -96,6 +103,24 @@ export interface DiagnosticFailure {
   command: string;
   exitCode: number | null;
   output: string;
+}
+
+export interface TeachingEvidence {
+  path: string;
+  lineRanges: string[];
+  excerpt: string;
+}
+
+export interface TeachingCandidate {
+  library: string;
+  version?: string;
+  query: string;
+  confidence: number;
+  reasons: string[];
+  files: string[];
+  evidence: TeachingEvidence[];
+  manifest: string;
+  promptSignal: string;
 }
 
 export interface QuestionDraft {

@@ -3,9 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION="$ROOT_DIR/src/index.ts"
-INFO_FILE="${DUCK_AGENT_INFO_FILE:-/tmp/info.txt}"
+MODEL_CONFIG="${DUCK_AGENT_MODEL_CONFIG:-$ROOT_DIR/duck-agent.toml}"
 KEY_FILE="${DUCK_AGENT_KEY_FILE:-${XDG_CONFIG_HOME:-${HOME}/.config}/duck-agent/api-key}"
-CODEX_CONFIG="${DUCK_AGENT_CODEX_CONFIG:-${HOME}/.codex/config.toml}"
 RUNTIME_DIR="$ROOT_DIR/.duck-runtime"
 RUNTIME_MODELS="$RUNTIME_DIR/models.json"
 
@@ -30,18 +29,15 @@ fi
 
 mkdir -p "$RUNTIME_DIR"
 
-# Parse model metadata at launch without printing either source file. Codex's
-# Provider config is authoritative when present. The key file is intentionally
-# never opened by this launcher; Pi reads it on request.
+# Parse the independent Duck model config at launch. The key file is
+# intentionally never opened by this launcher; Pi reads it on request.
 (
 cd "$ROOT_DIR"
-DUCK_AGENT_KEY_FILE="$KEY_FILE" node - "$INFO_FILE" "$RUNTIME_MODELS" "$CODEX_CONFIG" <<'NODE'
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+DUCK_AGENT_KEY_FILE="$KEY_FILE" node - "$MODEL_CONFIG" "$RUNTIME_MODELS" <<'NODE'
+import { readFileSync, writeFileSync } from "node:fs";
 import { parse as parseToml } from "smol-toml";
 
-const [infoPath, outputPath, codexConfigPath] = process.argv.slice(2);
-let baseUrl;
-let model;
+const [configPath, outputPath] = process.argv.slice(2);
 
 function clean(value) {
   return String(value ?? "")
@@ -50,129 +46,52 @@ function clean(value) {
     .trim();
 }
 
-function keyName(value) {
-  return clean(value).toLowerCase().replace(/[\s_-]+/g, "");
-}
-
-function isUrlKey(value) {
-  const normalized = keyName(value);
-  return normalized === "api" || normalized.includes("url") || normalized.includes("endpoint") || normalized.includes("address") || normalized.includes("地址");
-}
-
-function isModelKey(value) {
-  const normalized = keyName(value);
-  return normalized.includes("model") || normalized.includes("模型");
-}
-
-function readCodexModel() {
-  if (!codexConfigPath || !existsSync(codexConfigPath)) return undefined;
-  try {
-    const config = parseToml(readFileSync(codexConfigPath, "utf8"));
-    const providerId = clean(config.model_provider);
-    const provider = config.model_providers?.[providerId];
-    const configuredModel = clean(config.model);
-    const configuredUrl = clean(provider?.base_url);
-    if (!configuredModel || !configuredUrl) return undefined;
-    return {
-      baseUrl: configuredUrl,
-      model: configuredModel,
-      api: clean(provider?.wire_api) === "responses" ? "openai-responses" : "openai-completions",
-    };
-  } catch {
-    return undefined;
-  }
-}
-
-const codexModel = readCodexModel();
-if (codexModel) {
-  baseUrl = codexModel.baseUrl;
-  model = codexModel.model;
-}
-
-const raw = existsSync(infoPath) ? readFileSync(infoPath, "utf8").replace(/^\uFEFF/, "").trim() : "";
-
 try {
-  const parsed = JSON.parse(raw);
-  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-    for (const [key, value] of Object.entries(parsed)) {
-      const normalized = keyName(key);
-      if (isUrlKey(normalized)) {
-        baseUrl ??= clean(value);
-      }
-      if (isModelKey(normalized)) {
-        model ??= clean(value);
-      }
-    }
+  const parsed = parseToml(readFileSync(configPath, "utf8"));
+  const source = parsed.model && typeof parsed.model === "object" ? parsed.model : parsed;
+  const baseUrl = clean(source.base_url ?? source.baseUrl);
+  const model = clean(typeof parsed.model === "string" ? parsed.model : source.model ?? source.model_id ?? source.modelId);
+  const rawApi = clean(source.api ?? source.wire_api ?? source.wireApi).toLowerCase();
+  const api = rawApi === "responses"
+    ? "openai-responses"
+    : rawApi === "completions"
+      ? "openai-completions"
+      : rawApi || "openai-completions";
+
+  if (!baseUrl || !model) {
+    throw new Error(`${configPath} must define base_url and model`);
   }
-} catch {
-  // The simple line-based formats below are also supported.
-}
-
-const lines = raw
-  .split(/\r?\n/)
-  .map((line) => line.trim())
-  .filter((line) => line && !line.startsWith("#"));
-const values = [];
-
-for (const line of lines) {
-  const match = line.match(/^([^=:]+?)\s*[:=]\s*(.+)$/);
-  if (match) {
-    const normalized = keyName(match[1]);
-    const value = clean(match[2]);
-    if (isUrlKey(normalized)) {
-      baseUrl ??= value;
-    } else if (isModelKey(normalized)) {
-      model ??= value;
-    } else {
-      values.push(value);
-    }
-  } else {
-    values.push(clean(line));
+  if (api !== "openai-completions" && api !== "openai-responses") {
+    throw new Error(`${configPath} api must be openai-completions or openai-responses`);
   }
-}
 
-if (!baseUrl) {
-  baseUrl = values.find((value) => /^https?:\/\//i.test(value));
-}
-if (!baseUrl) {
-  baseUrl = raw.match(/https?:\/\/[^\s,;]+/i)?.[0]?.replace(/[)\]}>'"]+$/, "");
-}
-if (!model) {
-  model = values.find((value) => value && value !== baseUrl && !/^https?:\/\//i.test(value));
-}
-if (!model && baseUrl) {
-  const remainder = raw.slice(raw.indexOf(baseUrl) + baseUrl.length).replace(/^[\s,;|]+/, "").trim();
-  if (remainder && !remainder.includes("/")) model = clean(remainder);
-}
+  const config = {
+    providers: {
+      "duck-runtime": {
+        name: "Duck runtime provider",
+        baseUrl,
+        api,
+        apiKey: `!cat ${process.env.DUCK_AGENT_KEY_FILE ?? "/home/aik/.config/duck-agent/api-key"}`,
+        models: [
+          {
+            id: model,
+            name: model,
+            reasoning: false,
+            input: ["text"],
+            contextWindow: 128000,
+            maxTokens: 16384,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          },
+        ],
+      },
+    },
+  };
 
-if (!baseUrl || !model) {
-  process.stderr.write("Duck Agent could not find an API URL and model name in the model info file.\n");
+  writeFileSync(outputPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+} catch (error) {
+  process.stderr.write(`Duck Agent model config error: ${error instanceof Error ? error.message : String(error)}\n`);
   process.exit(1);
 }
-
-const config = {
-  providers: {
-    "duck-runtime": {
-      name: "Duck runtime provider",
-      baseUrl,
-      api: codexModel?.api ?? "openai-completions",
-      apiKey: `!cat ${process.env.DUCK_AGENT_KEY_FILE ?? "/home/aik/.config/duck-agent/api-key"}`,
-      models: [
-        {
-          id: model,
-          name: model,
-          reasoning: false,
-          input: ["text"],
-          contextWindow: 128000,
-          maxTokens: 16384,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        },
-      ],
-    },
-  },
-};
-
-writeFileSync(outputPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
 NODE
 )
 
